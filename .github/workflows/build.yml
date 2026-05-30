@@ -1,23 +1,18 @@
 # ============================================================
 #  Build LaTeX — Engineering AI Agents for Production Vol. 2
-#  Evaluation notes vs. original proposed CI:
 #
-#  FIXED (3 issues):
-#  1. Entry point: original used `main.tex` at root. Our file
-#     is at `Tex/main.tex` — latexmk must run from repo root
-#     and reference Tex/main.tex explicitly.
-#  2. XeLaTeX: volume2.tex declares `%!TEX program = xelatex`
-#     and uses fontspec/polyglossia. latexmk flag must be
-#     -xelatex, not -pdf (which defaults to pdflatex).
-#  3. Output dir: -outdir path must be relative to the .tex
-#     file's location for latexmk aux files; we use
-#     -output-directory=Output and cd into Tex/ first.
+#  ROOT CAUSE OF PREVIOUS FAILURE:
+#  `cd Tex` moved CWD to Tex/, so \input{Tex/preamble} became
+#  Tex/Tex/preamble.tex — not found.
 #
-#  KEPT:
-#  - xu-cheng/texlive-action@v2 with scheme: full  (correct)
-#  - actions/checkout@v4                            (correct)
-#  - actions/upload-artifact@v4                     (correct)
-#  - Trigger on push + pull_request                 (correct)
+#  FIX: Run latexmk from repo root (no cd). The .tex file
+#  is referenced as Tex/main.tex. All \input{Tex/...} paths
+#  in main.tex resolve correctly from repo root.
+#  -output-directory is set to Tex/Output (repo-root-relative).
+#
+#  xu-cheng/texlive-action mounts the workspace at
+#  GITHUB_WORKSPACE and sets CWD to it — so repo root is
+#  always the working directory inside the container.
 # ============================================================
 name: Build LaTeX to PDF
 
@@ -43,13 +38,12 @@ jobs:
         with:
           scheme: full
           run: |
-            cd Tex
             latexmk \
               -xelatex \
               -interaction=nonstopmode \
               -halt-on-error \
-              -output-directory=Output \
-              main.tex
+              -output-directory=Tex/Output \
+              Tex/main.tex
 
       - name: Upload PDF artifact
         uses: actions/upload-artifact@v4
