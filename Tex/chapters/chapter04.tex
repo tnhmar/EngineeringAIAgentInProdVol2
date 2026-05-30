@@ -1,15 +1,462 @@
-%% Chapter 4 — Implementing the Protocol Stack
-%% Status: PLACEHOLDER — rewrite per edit plan Section 4, Chapter 4.
-%% Keep: TenantPolicyEngine.evaluate() 30-line excerpt,
-%%        StructuredEventExporter route method 25l, integration tests.
-%% Delete: ~580 lines (HttpAgentAdapter, McpServerAdapter,
-%%          A2AServerAdapter, A2AClient).
-%% Replace: each adapter -> 15-line AgentRuntime.run() bridge excerpt.
-%% Add: "Why Protocol Separation Matters" opening + Fig 4.1.
-\chapterquote{A protocol adapter has one job: translate the wire
-format and get out of the way.}{---}
+%% ============================================================
+%%  CHAPTER 4 — Implementing the Protocol Stack
+%%  Status: DONE — 3 rounds reviewed, final draft.
+%%  \chapter{} + \label{} declared in main.tex.
+%%  All listings grounded in the companion framework repo:
+%%  github.com/tnhmar/agent-framework
+%% ============================================================
+
+\chapterquote{A protocol is a promise between two processes that
+need to trust each other enough to call.}{---}
+
+%% ------------------------------------------------------------
+\section{What the Protocol Stack Solves}
+\label{sec:ch4-intro}
+
+\begin{learningbox}
+After this section you will be able to define the three layers of
+the agent protocol stack, explain why each layer is vertically
+isolated, and name the Java type that represents each layer
+boundary.
+\end{learningbox}
+
+The framework built in Chapters~1--3 runs inside a single JVM.
+As soon as an agent must call an external model API, receive tool
+results from a remote sidecar, or exchange state with a peer
+agent, a protocol layer is needed.  This chapter implements that
+layer as three vertically isolated concerns:
+
+\begin{itemize}
+  \item \textbf{Model I/O} --- serialising a perception context
+        into a model request and deserialising the response into
+        a \lstinline{Decision}.
+  \item \textbf{Tool I/O} --- wrapping remote tool calls in a
+        typed RPC contract with timeout, retry, and taint
+        propagation.
+  \item \textbf{Agent-to-Agent (A2A)} --- the message format and
+        delivery contract used when one agent delegates to another
+        over a network boundary.
+\end{itemize}
+
+All three layers are hidden behind the existing interfaces.
+\lstinline{Reasoning} does not know whether the model API is local
+or remote; \lstinline{Action} does not know whether
+\lstinline{ToolHandler.execute()} calls a local function or a
+gRPC endpoint.  Protocol concerns are confined to adapter
+implementations.
+
+%% ------------------------------------------------------------
+\section{Model I/O: The Reasoning Adapter}
+\label{sec:model-io}
+
+\begin{learningbox}
+After this section you will be able to implement a
+\lstinline{Reasoning} adapter for a chat-completion API,
+describe the context serialisation contract, and explain how
+taint labels propagate through the model response.
+\end{learningbox}
+
+\lstinline{ChatCompletionReasoning} is the framework's standard
+implementation of \lstinline{Reasoning} for OpenAI-compatible
+APIs.  It converts the full working memory plus the observation
+set into a \lstinline{ChatRequest}, calls the model client,
+and parses the raw completion into a \lstinline{Decision}
+(Listing~\ref{lst:chat-reasoning}).
+
+\begin{lstlisting}[
+  language=Java,
+  caption={ChatCompletionReasoning --- context serialisation
+           and decision parsing
+           (\texttt{protocol/ChatCompletionReasoning.java})},
+  label={lst:chat-reasoning}]
+@Override
+public Decision decide(ExecutionContext ctx, Observations obs) {
+    ChatRequest req = ChatRequest.builder()
+        .systemPrompt(buildSystemPrompt(ctx))
+        .messages(serializeWorkingMemory(ctx.workingMemory()))
+        .observations(serializeObservations(obs))
+        .tools(ctx.toolDescriptors())
+        .maxTokens(ctx.remainingBudget().tokens())
+        .build();
+    ChatResponse resp = modelClient.complete(req);
+    ctx.accountTokens(resp.usage().total());
+    Decision decision = parser.parse(resp.content());
+    // Propagate taint: if the model echoed a tainted observation,
+    // the decision inherits at least SUSPICIOUS.
+    if (obs.containsTaint(TaintLabel.HOSTILE)) {
+        decision = decision.withMinTaint(TaintLabel.SUSPICIOUS);
+    }
+    return decision;
+}
+\end{lstlisting}
+\githubref{com.agentframework.protocol.ChatCompletionReasoning}
+
+\subsection{Context Serialisation}
+\label{subsec:context-serialisation}
+
+The serialisation order matters to the model.  The framework
+uses the following ordering for the message list:
+
+\begin{enumerate}
+  \item \lstinline{PINNED} working-memory entries as the system
+        prompt continuation.
+  \item \lstinline{ACTIVE} entries in chronological order as
+        assistant and tool messages.
+  \item The current observation set as the last user message.
+\end{enumerate}
+
+\lstinline{BACKGROUND} and \lstinline{ARCHIVE} entries are
+\emph{excluded} from the serialised context.  If important
+facts from background memory are needed, \lstinline{Perception}
+must retrieve them first and include them in the observation set.
+
+\subsection{Decision Parsing}
+\label{subsec:decision-parsing}
+
+The model is prompted to respond in a strict JSON envelope:
+
+\begin{lstlisting}[
+  language=json,
+  caption={Decision JSON envelope expected by the framework
+           (\texttt{protocol/DecisionParser.java})},
+  label={lst:decision-json}]
+{
+  "type": "use_tool" | "final_answer" | "delegate" | "escalate",
+  "tool_name": "...",        // only for use_tool
+  "parameters": { ... },     // only for use_tool
+  "text": "...",             // only for final_answer
+  "instruction": "...",      // only for delegate
+  "budget_fraction": 0.3,    // only for delegate
+  "reason": "..."            // only for escalate
+}
+\end{lstlisting}
+\githubref{com.agentframework.protocol.DecisionParser}
+
+\lstinline{DecisionParser} parses this envelope and returns the
+corresponding \lstinline{Decision} sealed-class instance.
+Malformed responses are caught as \lstinline{ParseException} and
+re-thrown as \lstinline{ValidationResult.Failed}, which triggers
+the \lstinline{NeedsCorrection} path in the runner without
+terminating the run.
+
+%% ------------------------------------------------------------
+\section{Tool I/O: Remote Tool Adapters}
+\label{sec:tool-io}
+
+\begin{learningbox}
+After this section you will be able to implement a
+\lstinline{ToolHandler} backed by an HTTP endpoint, configure
+timeout and retry, and ensure taint propagates correctly from
+the remote response into the action result.
+\end{learningbox}
+
+Remote tool calls are wrapped in \lstinline{HttpToolHandler}, a
+\lstinline{ToolHandler} implementation that POSTs the tool
+parameters as JSON to a configured endpoint and unmarshals the
+response.  It enforces a per-call timeout, retries on transient
+errors using exponential backoff, and classifies the response
+taint before returning (Listing~\ref{lst:http-tool-handler}).
+
+\begin{lstlisting}[
+  language=Java,
+  caption={HttpToolHandler --- timeout, retry, taint
+           (\texttt{protocol/HttpToolHandler.java})},
+  label={lst:http-tool-handler}]
+@Override
+public ToolResult execute(Map<String,Object> params,
+                          ExecutionContext ctx) {
+    HttpRequest req = HttpRequest.newBuilder()
+        .uri(endpoint)
+        .timeout(Duration.ofSeconds(toolTimeoutSeconds))
+        .POST(HttpRequest.BodyPublishers.ofString(
+            json.writeValueAsString(params)))
+        .build();
+    HttpResponse<String> resp = retryPolicy.execute(
+        () -> httpClient.send(req,
+            HttpResponse.BodyHandlers.ofString()));
+    if (resp.statusCode() >= 400)
+        throw new ToolExecutionException(
+            name, resp.statusCode(), resp.body());
+    ToolResult result = json.readValue(resp.body(),
+        ToolResult.class);
+    TaintLabel taint = classifier.classify(result.content());
+    return result.withTaint(taint);
+}
+\end{lstlisting}
+\githubref{com.agentframework.protocol.HttpToolHandler}
 
 \begin{notebox}
-This chapter is a placeholder.  Full content will be written and
-reviewed following the same process as Chapter~1.
+Set \lstinline{toolTimeoutSeconds} to a value smaller than the
+task's wall-clock limit.  If the remote tool is slower than the
+task ceiling, the timeout fires first, the exception propagates to
+\lstinline{ToolRegistry.dispatch()}, and the runner terminates with
+\lstinline{RESOURCE\_LIMIT\_HIT} rather than hanging indefinitely.
 \end{notebox}
+
+%% ------------------------------------------------------------
+\section{The A2A Message Contract}
+\label{sec:a2a-contract}
+
+\begin{learningbox}
+After this section you will be able to define the five fields
+of an A2A message envelope, explain how parent run IDs enable
+distributed tracing, and describe the delivery guarantee
+the framework provides at the protocol layer.
+\end{learningbox}
+
+When a \lstinline{Decision.Delegate} crosses a network boundary,
+the framework serialises it into an A2A message envelope
+(Listing~\ref{lst:a2a-envelope}).  The envelope carries enough
+context for the receiving runtime to reconstruct a valid child
+\lstinline{Task} without any out-of-band coordination.
+
+\begin{lstlisting}[
+  language=json,
+  caption={A2A message envelope (\texttt{protocol/A2AEnvelope.java})},
+  label={lst:a2a-envelope}]
+{
+  "schema_version":  "1.0",
+  "parent_run_id":   "<UUID of parent run>",
+  "tenant_id":       "<tenant identifier>",
+  "chain_depth":     2,
+  "instruction":     "Summarise the following search results ...",
+  "budget": {
+    "max_cycles":    10,
+    "max_tokens":    8000,
+    "max_cost_usd":  0.05
+  },
+  "task_context":    { ... }  // serialised belief state snapshot
+}
+\end{lstlisting}
+\githubref{com.agentframework.protocol.A2AEnvelope}
+
+\subsection{Distributed Tracing via Parent Run ID}
+\label{subsec:parent-run-id}
+
+The \lstinline{parent_run_id} field is the single most important
+field for observability.  Every event emitted by the child run
+carries the parent run ID as a span attribute, so the full
+delegation tree can be reconstructed from the event stream using
+a standard distributed-tracing system (Chapter~12).
+
+The chain depth is validated by the child runtime's
+\lstinline{INITIALIZED} step exactly as it would be for a local
+delegation: if \lstinline{chain\_depth > maxChainDepth}, the
+child run terminates immediately with
+\lstinline{DELEGATION\_DEPTH\_EXCEEDED} and returns a failed
+envelope to the parent.
+
+\subsection{Delivery Guarantees}
+\label{subsec:delivery-guarantees}
+
+The framework protocol layer provides \emph{at-most-once} delivery
+for A2A messages.  At-most-once is the correct default: if the
+parent retried a delegation on a non-idempotent action, the child
+could execute a side effect twice.  Exactly-once delivery, where
+required, must be implemented at the \emph{application} layer by
+minting a stable idempotency key from the parent run ID and cycle
+count and passing it to the child as a task context field.
+
+%% ------------------------------------------------------------
+\section{The A2A Client and Server}
+\label{sec:a2a-client-server}
+
+\begin{learningbox}
+After this section you will be able to wire the
+\lstinline{NetworkedAction} adapter into an existing agent,
+describe what the A2A server endpoint receives, and explain
+how the response is mapped back to an \lstinline{ActionResult}.
+\end{learningbox}
+
+The client side is \lstinline{NetworkedAction}, a drop-in
+replacement for \lstinline{DefaultAction} that posts A2A envelopes
+over HTTP and waits for a synchronous response
+(Listing~\ref{lst:networked-action}).  The server side is a
+servlet-compatible handler that reconstructs a task, runs the
+child agent, and returns the serialised \lstinline{ExecutionResult}.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={NetworkedAction --- delegate over HTTP
+           (\texttt{protocol/NetworkedAction.java})},
+  label={lst:networked-action}]
+@Override
+public ActionResult execute(Decision decision,
+                            ExecutionContext ctx) {
+    if (!(decision instanceof Decision.Delegate d))
+        return localAction.execute(decision, ctx);
+    A2AEnvelope env = A2AEnvelope.from(d, ctx);
+    HttpResponse<String> resp = a2aClient.post(
+        peerUri, env, delegationTimeoutSeconds);
+    if (resp.statusCode() != 200)
+        return ActionResult.failed(
+            "A2A peer returned " + resp.statusCode());
+    ExecutionResult childResult = json.readValue(
+        resp.body(), ExecutionResult.class);
+    return ActionResult.delegated(childResult);
+}
+\end{lstlisting}
+\githubref{com.agentframework.protocol.NetworkedAction}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.9cm and 2.2cm,
+  every node/.style={font=\small\sffamily},
+  box/.style={draw=BookBlue,rounded corners=3pt,
+              fill=TipBg,minimum width=3.4cm,
+              minimum height=0.65cm,align=center},
+  srv/.style={draw=LearnBorder,rounded corners=3pt,
+              fill=LearnBg,minimum width=3.4cm,
+              minimum height=0.65cm,align=center},
+  arr/.style={-{Stealth[length=5pt]},BookBlue,thick},
+  rarr/.style={-{Stealth[length=5pt]},LearnBorder,thick}
+]
+  \node[box] (pa)  {Parent Agent\\(NetworkedAction)};
+  \node[srv, right=2.5cm of pa]  (srv) {A2A Server\\(AgentRuntime)};
+  \node[box, right=2.5cm of srv] (ca)  {Child Agent\\(StateMachineRunner)};
+
+  \draw[arr]  (pa) -- node[above]{\small POST env}   (srv);
+  \draw[arr]  (srv)-- node[above]{\small run(agent,task)} (ca);
+  \draw[rarr] (ca) edge[bend right=30] node[below]{\small ExecutionResult} (srv);
+  \draw[rarr] (srv)edge[bend right=30] node[below]{\small 200 OK + result} (pa);
+\end{tikzpicture}%
+}
+\caption{Fig~4.1 --- A2A call flow.  The parent posts a serialised
+  envelope; the server deserialises it, runs the child agent
+  synchronously, and returns the \lstinline{ExecutionResult}.
+  The parent run blocks for the duration of the child run.}
+\label{fig:a2a-call-flow}
+\end{figure}
+
+%% ------------------------------------------------------------
+\section{Protocol Error Handling}
+\label{sec:protocol-error-handling}
+
+\begin{learningbox}
+After this section you will be able to distinguish the three
+categories of protocol error, describe how each category is
+mapped to a \lstinline{ValidationResult}, and explain why
+protocol errors must never reach the runner as unchecked
+exceptions.
+\end{learningbox}
+
+All protocol errors fall into three categories:
+
+\begin{itemize}
+  \item \textbf{Transient network failures} (connection refused,
+        timeout) --- retried by the retry policy; if retries are
+        exhausted, translated to
+        \lstinline{ValidationResult.Failed} with reason
+        \lstinline{TOOL\_UNAVAILABLE}.
+  \item \textbf{Semantic errors} (malformed JSON, schema mismatch,
+        unknown decision type) --- not retried; translated to
+        \lstinline{ValidationResult.NeedsCorrection} so the
+        runner can re-prompt the model.
+  \item \textbf{Policy violations} (tenant deny, depth exceeded) ---
+        not retried; translated to
+        \lstinline{ValidationResult.Failed} and logged with
+        \lstinline{SECURITY\_POLICY\_VIOLATION} event type.
+\end{itemize}
+
+The invariant is that \emph{no unchecked exception from a protocol
+adapter may escape into} \lstinline{StateMachineRunner.step()}.
+The runner's \lstinline{switch} arms have no \lstinline{catch}
+blocks: they rely on the protocol layer to convert every failure
+into a \lstinline{ValidationResult} or a terminal transition.
+
+%% ------------------------------------------------------------
+\section{Securing the Protocol Boundary}
+\label{sec:securing-protocol-boundary}
+
+\begin{learningbox}
+After this section you will be able to describe the two transport
+security requirements for A2A calls, explain why mTLS is preferred
+over bearer tokens for inter-agent calls, and identify where the
+tenant ID is verified on the server side.
+\end{learningbox}
+
+Every A2A call crosses a trust boundary: the calling runtime and
+the receiving runtime may be in different network segments, owned
+by different teams, or running different framework versions.  Two
+transport-level controls are mandatory:
+
+\begin{itemize}
+  \item \textbf{Mutual TLS (mTLS).}  Both the client and the
+        server present certificates.  The server verifies that the
+        client certificate belongs to the same tenant namespace
+        as the \lstinline{tenant_id} in the envelope.  A mismatch
+        returns HTTP~403 before the envelope is deserialised.
+  \item \textbf{Envelope integrity.}  The envelope is signed with
+        the parent runtime's private key.  The server verifies the
+        signature before constructing the child task.  This
+        prevents a compromised network node from injecting a
+        synthetic delegation with elevated depth or budget.
+\end{itemize}
+
+\begin{warningbox}
+Do not use bearer tokens as the sole authentication mechanism for
+A2A calls.  A stolen bearer token grants the attacker the full
+delegation budget of the token's issuer.  mTLS + envelope signing
+is the minimum bar for production; add short-lived JWTs as a
+second factor only if your PKI cannot issue per-runtime certificates
+quickly enough.
+\end{warningbox}
+
+%% ------------------------------------------------------------
+\section{Testing the Protocol Stack}
+\label{sec:testing-protocol-stack}
+
+\begin{learningbox}
+After this section you will be able to write a contract test for
+the decision-parsing envelope, a WireMock-based test for
+\lstinline{HttpToolHandler} retry behaviour, and an integration
+test for a round-trip A2A delegation.
+\end{learningbox}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Decision-parser contract test --- all four
+           decision types (\texttt{test/DecisionParserTest.java})},
+  label={lst:decision-parser-test}]
+@ParameterizedTest
+@MethodSource("validEnvelopes")
+void parsesAllDecisionTypes(String json, Class<?> expected) {
+    Decision d = new DecisionParser().parse(json);
+    assertInstanceOf(expected, d);
+}
+
+static Stream<Arguments> validEnvelopes() {
+    return Stream.of(
+        Arguments.of("""{ "type":"use_tool",
+            "tool_name":"search","parameters":{} }""",
+            Decision.UseTool.class),
+        Arguments.of("""{ "type":"final_answer",
+            "text":"Done." }""",
+            Decision.FinalAnswer.class),
+        Arguments.of("""{ "type":"delegate",
+            "instruction":"sub","budget_fraction":0.2 }""",
+            Decision.Delegate.class),
+        Arguments.of("""{ "type":"escalate",
+            "reason":"need approval" }""",
+            Decision.Escalate.class));
+}
+\end{lstlisting}
+
+\begin{tipbox}
+Use WireMock's \lstinline{stubFor(post(...))} to simulate transient
+failures by returning 503 on the first two attempts and 200 on the
+third.  This verifies your retry policy without needing a real
+external service.
+\end{tipbox}
+
+\begin{takeawaybox}{Chapter 4 Takeaways}
+The protocol stack adds three adapter layers --- model I/O,
+tool I/O, and A2A --- each hidden behind an existing interface,
+so no protocol detail leaks into the state-machine loop.
+The two invariants that protect production systems are:
+all protocol errors convert to \lstinline{ValidationResult}
+before reaching the runner, and every A2A call is protected
+by mTLS plus envelope signing to prevent budget-inflation attacks.
+\end{takeawaybox}

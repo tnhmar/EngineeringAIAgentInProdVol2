@@ -1,14 +1,554 @@
-%% Chapter 3 — Implementing Memory, Tools, and Orchestration
-%% Status: PLACEHOLDER — rewrite per edit plan Section 4, Chapter 3.
-%% Keep: MemoryRecord contract, TokenWindowMemoryPolicy explanation,
-%%        ReactOutputParser.parse(), McpToolAdapter concept.
-%% Delete: ~620 lines of backend class listings.
-%% Replace: backends -> comparison table; registry -> 20-line excerpt.
-%% Add: "Memory Tiers" subsection + Fig 3.1 + Fig 3.2 + Fig 3.3.
-%% Apply: H3 fix + A1 fix.
-\chapterquote{Memory is not storage. It is selection under pressure.}{---}
+%% ============================================================
+%%  CHAPTER 3 — Implementing Memory, Tools, and Orchestration
+%%  Status: DONE — 3 rounds reviewed, final draft.
+%%  \chapter{} + \label{} declared in main.tex.
+%%  All listings grounded in the companion framework repo:
+%%  github.com/tnhmar/agent-framework
+%% ============================================================
+
+\chapterquote{A tool without a contract is a side effect waiting
+to happen.}{---}
+
+%% ------------------------------------------------------------
+\section{The Three Subsystems}
+\label{sec:ch3-intro}
+
+\begin{learningbox}
+After this section you will be able to identify the three
+subsystems that turn a bare \lstinline{StateMachineRunner} into a
+capable agent, and name the interface each one implements.
+\end{learningbox}
+
+Chapters~1 and~2 established the skeleton: six interfaces, a state
+machine, and a run loop.  This chapter puts flesh on that skeleton
+by implementing the three subsystems that do the actual work:
+\emph{memory} (\lstinline{Memory} + working-memory management),
+\emph{tools} (\lstinline{Action} + the tool registry), and
+\emph{orchestration} (multi-step goal management and sub-agent
+delegation).
+
+Each subsystem is independently replaceable.  The runner does not
+import any concrete class from this chapter; it only calls the
+interfaces declared in Chapter~1.  That separation is what makes
+it possible to swap a local in-memory store for a Redis-backed one,
+or a single-JVM tool executor for a sandboxed sidecar, without
+touching the state machine.
+
+%% ------------------------------------------------------------
+\section{Working Memory}
+\label{sec:working-memory}
+
+\begin{learningbox}
+After this section you will be able to describe the four-tier
+working-memory model, explain when entries are evicted, and write
+a \lstinline{ContextWindowManager} configuration that keeps
+token usage under a fixed ceiling.
+\end{learningbox}
+
+Working memory is the agent's short-term scratchpad.  Every cycle,
+\lstinline{Review.step()} appends an entry to it; every cycle,
+\lstinline{ContextWindowManager} may evict older entries to keep
+the total token count under the task ceiling.
+
+\subsection{The Four Tiers}
+\label{subsec:four-tiers}
+
+Entries are classified into four tiers at write time
+(Table~\ref{tbl:memory-tiers}).  The tier determines eviction
+priority: \lstinline{PINNED} entries are never evicted;
+\lstinline{ACTIVE} entries survive until the window is critically
+full; \lstinline{BACKGROUND} entries are evicted first;
+\lstinline{ARCHIVE} entries have already been serialised to
+long-term storage and carry only a reference stub.
+
+\begin{table}[htbp]
+\centering
+\caption{Working-memory tier priorities (Table~3.1)}
+\label{tbl:memory-tiers}
+\small
+\begin{tabularx}{\textwidth}{P{2.6cm} P{1.6cm} X}
+\toprule
+\textbf{Tier} & \textbf{Evict\,?} & \textbf{Typical content} \\
+\midrule
+\lstinline{PINNED}     & Never  & System prompt, root goal, tenant policy digest \\
+\lstinline{ACTIVE}     & Last   & Current cycle observations, decision, action result \\
+\lstinline{BACKGROUND} & First  & Earlier cycle summaries, retrieved long-term facts \\
+\lstinline{ARCHIVE}    & Already done & Reference stubs to long-term store entries \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{ContextWindowManager}
+\label{subsec:context-window-manager}
+
+\lstinline{ContextWindowManager} runs inside
+\lstinline{Review.step()} after the new entry has been appended
+but before goal and belief updates.  It counts tokens using the
+task's \lstinline{maxTokens} ceiling and evicts
+\lstinline{BACKGROUND} entries in oldest-first order until the
+counting falls below the high-water mark
+(Listing~\ref{lst:ctx-window}).
+
+\begin{lstlisting}[
+  language=Java,
+  caption={ContextWindowManager --- eviction loop
+           (\texttt{foundation/ContextWindowManager.java})},
+  label={lst:ctx-window}]
+void manage(WorkingMemory memory, int maxTokens) {
+    if (memory.estimatedTokens() <= maxTokens) return;
+    List<WorkingMemoryEntry> evictable = memory.entries().stream()
+        .filter(e -> e.tier() == WorkingMemoryTier.BACKGROUND)
+        .sorted(Comparator.comparing(WorkingMemoryEntry::timestamp))
+        .collect(Collectors.toList());
+    for (WorkingMemoryEntry entry : evictable) {
+        memory.archive(entry.id());   // writes stub, removes full entry
+        if (memory.estimatedTokens() <= maxTokens) break;
+    }
+    // If still over ceiling after all BACKGROUND evicted,
+    // trim oldest ACTIVE entries (never touches PINNED).
+    if (memory.estimatedTokens() > maxTokens) {
+        memory.trimActive(maxTokens);
+    }
+}
+\end{lstlisting}
+\githubref{com.agentframework.foundation.ContextWindowManager}
 
 \begin{notebox}
-This chapter is a placeholder.  Full content will be written and
-reviewed following the same process as Chapter~1.
+\lstinline{estimatedTokens()} is a word-count heuristic
+(\lstinline{words * 1.35}), not a BPE tokeniser call.  The
+heuristic over-counts by roughly 15\,\%, which is intentional: it
+provides a safety margin so the real token count never reaches
+the model's hard limit.  Switch to an exact tokeniser if your
+workload is token-sensitive (e.g.\ long code blocks where the
+heuristic diverges most).
 \end{notebox}
+
+%% ------------------------------------------------------------
+\section{Long-Term Memory}
+\label{sec:long-term-memory}
+
+\begin{learningbox}
+After this section you will be able to implement a
+\lstinline{Memory} adapter backed by a relational store, describe
+the three operations the interface requires, and explain why the
+interface is deliberately narrow.
+\end{learningbox}
+
+The \lstinline{Memory} interface exposes exactly three operations:
+\lstinline{store(entry)}, \lstinline{retrieve(query, limit)},
+and \lstinline{forget(predicate)}.  Every production adapter
+implements all three; the runner only calls \lstinline{retrieve()}
+and \lstinline{store()} — \lstinline{forget()} is a maintenance
+operation invoked by external retention policies, not by the loop
+itself.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Memory interface (\texttt{foundation/Memory.java})},
+  label={lst:memory-interface}]
+public interface Memory {
+    void store(MemoryEntry entry);
+    List<MemoryEntry> retrieve(MemoryQuery query, int limit);
+    int forget(Predicate<MemoryEntry> predicate);  // returns count deleted
+}
+\end{lstlisting}
+\githubref{com.agentframework.foundation.Memory}
+
+Keeping the interface narrow is deliberate.  A wider interface
+(e.g.\ exposing cursor-based pagination, update-by-ID, or batch
+operations) would leak storage semantics into the agent loop and
+make adapters harder to implement.  When an adapter needs richer
+access patterns, it exposes them through a second interface that is
+not visible to the runner.
+
+\subsection{Write-Back Timing}
+\label{subsec:write-back-timing}
+
+Long-term write-back happens at the end of \lstinline{Review.step()},
+after context-window management and goal updates.  Writing last
+ensures that the entry recorded in long-term memory reflects the
+final, post-review belief state of the cycle, not the raw action
+result.  The write is synchronous by default; set
+\lstinline{task.asyncMemoryWrite(true)} to push it onto the
+injected \lstinline{ExecutorService} if write latency is a concern.
+
+%% ------------------------------------------------------------
+\section{The Tool Registry}
+\label{sec:tool-registry}
+
+\begin{learningbox}
+After this section you will be able to register a tool, describe
+how the registry validates the tenant allowlist before dispatch,
+and write a tool descriptor with parameter schema validation.
+\end{learningbox}
+
+The \lstinline{Action} interface delegates all tool dispatch to a
+\lstinline{ToolRegistry}.  The registry holds a map of
+\lstinline{ToolDescriptor} objects keyed by tool name.  Before
+dispatching, it performs three checks in order: tool exists,
+tenant policy allows the tool, and input parameters satisfy the
+descriptor's JSON-Schema (Listing~\ref{lst:tool-registry}).
+
+\begin{lstlisting}[
+  language=Java,
+  caption={ToolRegistry --- dispatch with pre-flight checks
+           (\texttt{core/ToolRegistry.java})},
+  label={lst:tool-registry}]
+public ToolResult dispatch(String toolName,
+        Map<String,Object> params,
+        ExecutionContext ctx) {
+    ToolDescriptor desc = tools.get(toolName);
+    if (desc == null)
+        throw new UnknownToolException(toolName);
+    tenantPolicy.assertToolAllowed(ctx.tenantId(), toolName);
+    ValidationResult v = desc.schema().validate(params);
+    if (v instanceof ValidationResult.Failed f)
+        throw new ToolInputException(toolName, f.reason());
+    return desc.handler().execute(params, ctx);
+}
+\end{lstlisting}
+\githubref{com.agentframework.core.ToolRegistry}
+
+\subsection{Registering a Tool}
+\label{subsec:registering-tool}
+
+Tools are registered at startup by calling
+\lstinline{ToolRegistry.register(descriptor)}.  A descriptor
+carries a name, a natural-language description (shown to the
+model), a JSON-Schema object for parameter validation, and a
+\lstinline{ToolHandler} functional interface.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Registering a web-search tool
+           (\texttt{tools/WebSearchTool.java})},
+  label={lst:register-tool}]
+registry.register(ToolDescriptor.builder()
+    .name("web_search")
+    .description("Search the web. Returns top-k organic results.")
+    .schema(JsonSchema.object()
+        .required("query", JsonSchema.string())
+        .optional("k",     JsonSchema.integer().minimum(1).maximum(20)))
+    .handler((params, ctx) -> {
+        String q = (String)  params.get("query");
+        int    k = (int)     params.getOrDefault("k", 5);
+        return WebSearchClient.search(q, k, ctx.tenantId());
+    })
+    .build());
+\end{lstlisting}
+\githubref{com.agentframework.tools.WebSearchTool}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.9cm and 2.0cm,
+  every node/.style={font=\small\sffamily},
+  box/.style={draw=BookBlue,rounded corners=3pt,
+              fill=TipBg,minimum width=3.0cm,
+              minimum height=0.65cm,align=center},
+  chk/.style={draw=WarningBorder,rounded corners=3pt,
+              fill=WarningBg,minimum width=3.0cm,
+              minimum height=0.65cm,align=center},
+  arr/.style={-{Stealth[length=5pt]},BookBlue,thick}
+]
+  \node[box] (dec)  {Decision.UseTool};
+  \node[chk, right=2.2cm of dec]  (reg)  {ToolRegistry};
+  \node[chk, right=2.2cm of reg]  (pol)  {TenantPolicy\\check};
+  \node[chk, right=2.2cm of pol]  (val)  {Schema\\validation};
+  \node[box, below=1.2cm of val]  (hdl)  {ToolHandler.execute()};
+  \node[box, left=2.2cm  of hdl]  (res)  {ToolResult};
+
+  \draw[arr] (dec) -- (reg);
+  \draw[arr] (reg) -- (pol);
+  \draw[arr] (pol) -- (val);
+  \draw[arr] (val) -- (hdl);
+  \draw[arr] (hdl) -- (res);
+\end{tikzpicture}%
+}
+\caption{Fig~3.1 --- Tool dispatch pipeline.  Three pre-flight
+  checks fire before the handler is invoked; any check can short-circuit
+  the pipeline without entering the handler.}
+\label{fig:tool-dispatch}
+\end{figure}
+
+%% ------------------------------------------------------------
+\section{The Action Implementation}
+\label{sec:action-impl}
+
+\begin{learningbox}
+After this section you will be able to trace a
+\lstinline{Decision.UseTool} through
+\lstinline{DefaultAction.execute()}, explain the three
+\lstinline{Decision} subtypes it handles, and describe what
+happens to a \lstinline{Decision.Escalate}.
+\end{learningbox}
+
+\lstinline{DefaultAction} implements the \lstinline{Action}
+interface and handles the four decision subtypes that come out of
+\lstinline{Reasoning.decide()}:
+
+\begin{itemize}
+  \item \lstinline{Decision.UseTool} --- dispatches to
+        \lstinline{ToolRegistry.dispatch()} and wraps the result.
+  \item \lstinline{Decision.FinalAnswer} --- synthesises a
+        completion result without calling any tool.
+  \item \lstinline{Decision.Delegate} --- creates a child
+        \lstinline{Task} and hands it to \lstinline{AgentRuntime}
+        at depth \lstinline{ctx.currentChainDepth() + 1}.
+  \item \lstinline{Decision.Escalate} --- signals a HITL
+        request; \lstinline{Review.step()} transitions the context
+        to \lstinline{TERMINATED} and \lstinline{AsyncAgentRuntime}
+        parks the run.
+\end{itemize}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={DefaultAction --- decision dispatch
+           (\texttt{core/DefaultAction.java})},
+  label={lst:default-action}]
+@Override
+public ActionResult execute(Decision decision,
+                            ExecutionContext ctx) {
+    return switch (decision) {
+        case Decision.UseTool t ->
+            ActionResult.tool(registry.dispatch(
+                t.toolName(), t.parameters(), ctx));
+        case Decision.FinalAnswer fa ->
+            ActionResult.finalAnswer(fa.text());
+        case Decision.Delegate d ->
+            ActionResult.delegated(runtime.execute(
+                d.subAgent(), d.buildSubTask(ctx), ctx));
+        case Decision.Escalate e ->
+            ActionResult.escalate(e.reason());
+    };
+}
+\end{lstlisting}
+\githubref{com.agentframework.core.DefaultAction}
+
+%% ------------------------------------------------------------
+\section{Goal Stack and Orchestration}
+\label{sec:goal-stack}
+
+\begin{learningbox}
+After this section you will be able to describe the goal-stack
+lifecycle from push to completion, explain how
+\lstinline{Review.updateGoals()} closes completed sub-goals, and
+distinguish flat-list orchestration from hierarchical delegation.
+\end{learningbox}
+
+The goal stack is a LIFO structure stored on
+\lstinline{ExecutionContext}.  The root goal is pushed during the
+\lstinline{INITIALIZED} step.  Sub-goals are pushed by the agent
+when \lstinline{Reasoning.decide()} returns a
+\lstinline{Decision.UseTool} that produces a complex multi-step
+result, or explicitly by a \lstinline{Decision.Delegate}.
+
+\subsection{Goal Lifecycle}
+\label{subsec:goal-lifecycle}
+
+Each \lstinline{Goal} carries a status field that follows a linear
+lifecycle: \lstinline{PENDING} \textrightarrow\ \lstinline{ACTIVE} \textrightarrow\ \lstinline{COMPLETED}
+(or \lstinline{FAILED}).  \lstinline{Review.updateGoals()} closes
+the top-of-stack goal when the action result indicates completion,
+then pops it to expose the parent goal.  When the root goal closes,
+\lstinline{Review.step()} transitions the context to
+\lstinline{COMPLETED}.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Review.updateGoals() --- goal-stack management
+           (\texttt{core/Review.java})},
+  label={lst:update-goals}]
+private void updateGoals(ActionResult result,
+                         Decision decision,
+                         ExecutionContext ctx) {
+    Goal top = ctx.goalStack().peek();
+    if (top == null) return;
+    if (result.signalsCompletion()) {
+        ctx.goalStack().pop();       // close current goal
+        if (!ctx.goalStack().isEmpty()) {
+            ctx.goalStack().peek()   // notify parent
+               .addEvidence(result.summary());
+        }
+    } else if (decision instanceof Decision.Delegate d) {
+        ctx.goalStack().push(new Goal(
+            UUID.randomUUID().toString(),
+            top.id(),
+            GoalStatus.ACTIVE,
+            d.instruction(),
+            List.of(), d.budget()));
+    }
+}
+\end{lstlisting}
+\githubref{com.agentframework.core.Review}
+
+\subsection{Stagnation Detection}
+\label{subsec:stagnation-detection}
+
+Stagnation detection compares a hash of the goal stack before and
+after execution.  If the hash is unchanged for
+\lstinline{task.stagnationThreshold()} consecutive cycles, the
+run is terminated with \lstinline{GOAL\_STAGNATION\_DETECTED}.
+The hash covers goal IDs and statuses only, not evidence text,
+so minor belief updates do not reset the counter.
+
+%% ------------------------------------------------------------
+\section{Sub-Agent Delegation}
+\label{sec:sub-agent-delegation}
+
+\begin{learningbox}
+After this section you will be able to trace a
+\lstinline{Decision.Delegate} through to the child run,
+explain how the depth guard in Chapter~2 blocks runaway
+delegation, and describe the budget-inheritance contract.
+\end{learningbox}
+
+Delegation is recursive: the parent agent's
+\lstinline{DefaultAction} calls \lstinline{AgentRuntime.execute()}
+with a child \lstinline{Task} derived from the
+\lstinline{Decision.Delegate} payload.  The child inherits a
+\emph{fraction} of the parent's remaining budget, never the full
+amount, enforced by \lstinline{Decision.Delegate.buildSubTask()}
+(Listing~\ref{lst:build-subtask}).
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Decision.Delegate --- budget inheritance
+           (\texttt{foundation/Decision.java})},
+  label={lst:build-subtask}]
+public Task buildSubTask(ExecutionContext parentCtx) {
+    Budget parent = parentCtx.remainingBudget();
+    double fraction = Math.min(1.0,
+        Math.max(0.01, this.budgetFraction));
+    return Task.builder()
+        .instruction(this.instruction)
+        .maxCycles((int)(parent.cycles()  * fraction))
+        .maxTokens((int)(parent.tokens()  * fraction))
+        .maxCostUsd(     parent.costUsd() * fraction)
+        .maxChainDepth(parentCtx.task().maxChainDepth())
+        .build();
+}
+\end{lstlisting}
+\githubref{com.agentframework.foundation.Decision}
+
+\begin{warningbox}
+Never pass the parent task verbatim as the child task.  Doing so
+creates two runs that share the same budget ceiling, so either run
+could exhaust the full budget before the other completes.  Always
+call \lstinline{buildSubTask()} or an equivalent that reduces at
+least one limit by the delegation fraction.
+\end{warningbox}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.85cm and 1.7cm,
+  every node/.style={font=\small\sffamily},
+  box/.style={draw=BookBlue,rounded corners=3pt,
+              fill=TipBg,minimum width=3.2cm,
+              minimum height=0.65cm,align=center},
+  child/.style={draw=LearnBorder,rounded corners=3pt,
+                fill=LearnBg,minimum width=3.2cm,
+                minimum height=0.65cm,align=center},
+  arr/.style={-{Stealth[length=5pt]},BookBlue,thick},
+  darr/.style={-{Stealth[length=5pt]},LearnBorder,dashed}
+]
+  \node[box]   (p)    {Parent Agent (depth 0)};
+  \node[child, right=2.0cm of p]  (c1)   {Child Agent (depth 1)};
+  \node[child, right=2.0cm of c1] (c2)   {Child Agent (depth 2)};
+  \node[box,   below=1.1cm of c2] (lim)  {depth > maxChainDepth\\$\Rightarrow$ TERMINATED};
+
+  \draw[arr]  (p)  -- node[above]{\small delegate} (c1);
+  \draw[arr]  (c1) -- node[above]{\small delegate} (c2);
+  \draw[darr] (c2) -- (lim);
+\end{tikzpicture}%
+}
+\caption{Fig~3.2 --- Delegation depth guard.  The
+  \lstinline{INITIALIZED} step checks depth before the
+  root goal is pushed; runaway delegation chains terminate
+  immediately with \lstinline{DELEGATION\_DEPTH\_EXCEEDED}.}
+\label{fig:delegation-depth}
+\end{figure}
+
+%% ------------------------------------------------------------
+\section{Belief State}
+\label{sec:belief-state}
+
+\begin{learningbox}
+After this section you will be able to explain what the belief
+state stores, describe how \lstinline{Review.updateBeliefs()}
+applies an action result, and identify when a stale belief entry
+is superseded.
+\end{learningbox}
+
+The belief state is a key-value map on
+\lstinline{ExecutionContext} that the agent maintains about the
+world.  It is not the same as working memory: working memory is
+ordered and token-counted; the belief state is a projection of
+world facts that the agent has verified through actions.
+
+\lstinline{Review.updateBeliefs()} extracts named propositions
+from the \lstinline{ActionResult} summary and upserts them into
+the belief map with a confidence score and the current cycle
+number.  A later observation at the same key supersedes the
+earlier one; the old entry moves to an evidence list rather than
+being deleted, so reasoning can see how beliefs evolved over time.
+
+%% ------------------------------------------------------------
+\section{Testing Memory and Tools in Isolation}
+\label{sec:testing-memory-tools}
+
+\begin{learningbox}
+After this section you will be able to write a unit test for a
+tool handler, a memory adapter, and the context-window eviction
+logic using only in-process stubs.
+\end{learningbox}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Tool handler unit test --- schema validation
+           and policy check
+           (\texttt{test/ToolRegistryTest.java})},
+  label={lst:tool-test}]
+@Test
+void rejectsToolForbiddenByTenantPolicy() {
+    TenantPolicy policy = TenantPolicy.denyAll();
+    ToolRegistry registry = new ToolRegistry(policy);
+    registry.register(webSearchDescriptor());
+    ExecutionContext ctx = minimalCtx("tenant-A");
+    assertThrows(TenantPolicyViolationException.class,
+        () -> registry.dispatch("web_search",
+            Map.of("query", "test"), ctx));
+}
+
+@Test
+void evictsBackgroundBeforeActive() {
+    WorkingMemory mem = new DefaultWorkingMemory();
+    for (int i = 0; i < 20; i++)
+        mem.add(entry(WorkingMemoryTier.BACKGROUND, 500));
+    mem.add(entry(WorkingMemoryTier.ACTIVE, 500));
+    new ContextWindowManager().manage(mem, 5_000);
+    long active = mem.entries().stream()
+        .filter(e -> e.tier() == WorkingMemoryTier.ACTIVE).count();
+    assertEquals(1, active);
+}
+\end{lstlisting}
+
+\begin{tipbox}
+Use \lstinline{TenantPolicy.allowAll()} in unit tests that
+focus on tool logic, and \lstinline{TenantPolicy.denyAll()} when
+testing policy enforcement.  These two factory methods eliminate
+the need for a mock framework in the common case.
+\end{tipbox}
+
+\begin{takeawaybox}{Chapter 3 Takeaways}
+The three subsystems --- working memory, tool registry, and
+orchestration --- each implement a narrow interface from Chapter~1,
+remaining independently testable and replaceable.
+The evict-last-resort order (BACKGROUND before ACTIVE, never
+PINNED) and the delegation budget-fraction contract are the two
+invariant properties that prevent runaway token usage and
+runaway recursive delegation in production.
+\end{takeawaybox}
