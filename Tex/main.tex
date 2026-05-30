@@ -1,0 +1,285 @@
+%!TEX program = xelatex
+%% ============================================================
+%%  MAIN ENTRY POINT
+%%  Engineering AI Agents for Production — Volume 2
+%%  Infrastructure, Observability, Security, and Production
+%%  Case Studies
+%%
+%%  Compile: latexmk -xelatex -interaction=nonstopmode main.tex
+%%           Output written to Tex/Output/main.pdf (via CI)
+%% ============================================================
+
+\input{Tex/preamble}
+
+\gdef\theBookTitle{Engineering AI Agents for Production}
+\gdef\theBookSubtitle{Infrastructure, Observability, Security,
+and Production Case Studies}
+\gdef\theBookAuthor{Haythem Aber}
+\gdef\theBookYear{2026}
+\gdef\theBookDate{April 2026}
+\gdef\theBookVolume{Volume 2}
+\gdef\theBookVolumeScope{From LLMs to Agent Ecosystems}
+
+% ---- front-matter macros (inline — no separate file needed) --
+\newcommand{\makehalftitle}{%
+  \cleardoublepage\thispagestyle{empty}\vspace*{\fill}
+  \begin{center}
+    {\sffamily\LARGE\bfseries\color{BookBlue}\theBookTitle}
+  \end{center}
+  \vspace*{\fill}\clearpage}
+
+\newcommand{\makecover}{%
+  \begin{titlepage}\thispagestyle{empty}\vspace*{2cm}
+    \begin{center}
+      {\sffamily\large\scshape\theBookVolume\par}\vspace{0.3cm}
+      {\sffamily\small\itshape\theBookVolumeScope\par}\vspace{1.2cm}
+      \hrule height 0.5pt\par\vspace{1.2cm}
+      {\sffamily\fontsize{38}{46}\bfseries\selectfont\theBookTitle\par}
+      \vspace{1.2cm}\hrule height 0.5pt\par\vspace{0.8cm}
+      {\sffamily\fontsize{11}{14}\selectfont\theBookSubtitle\par}
+      \vspace{1.5cm}{\sffamily\Large\theBookAuthor\par}\vfill
+      {\sffamily\normalsize\theBookDate\par}\vspace{0.5cm}
+      {\sffamily\small\itshape Volume~1: \textit{Architecting AI
+        Agent Systems} --- Available Now\par}\vspace{0.8cm}
+    \end{center}
+  \end{titlepage}\nopagecolor}
+
+\newcommand{\makecopyright}{%
+  \thispagestyle{empty}\vspace*{\fill}
+  \begin{small}
+    \noindent\textit{\theBookTitle}\\
+    \textit{\theBookSubtitle}\\
+    \textit{\theBookVolume: \theBookVolumeScope}\\[12pt]
+    \noindent Copyright \textcopyright{} \theBookYear\ \theBookAuthor.
+    All rights reserved.\\[8pt]
+    \noindent No part of this publication may be reproduced,
+    distributed, or transmitted without prior written permission
+    of the author.\\[8pt]
+    \noindent\textbf{Permissions:} Contact the author directly.\\[8pt]
+    \noindent First edition. \theBookDate.
+  \end{small}
+  \vspace*{\fill}\clearpage}
+
+\newcommand{\makededication}[1]{%
+  \cleardoublepage\thispagestyle{empty}\vspace*{\fill}
+  \begin{center}\itshape #1\end{center}
+  \vspace*{\fill}\clearpage}
+
+\newenvironment{preface}{%
+  \cleardoublepage
+  \chapter*{Preface to Volume~2}
+  \addcontentsline{toc}{chapter}{Preface to Volume~2}
+  \markboth{Preface to Volume~2}{Preface to Volume~2}%
+}{\clearpage}
+
+\pretocmd{\tableofcontents}{\cleardoublepage}{}{}
+\setcounter{tocdepth}{1}
+
+% ============================================================
+\begin{document}
+% ============================================================
+
+\frontmatter
+\makehalftitle
+\makecover
+\makecopyright
+\makededication{%
+  Architecture is the set of decisions\\
+  that are hard to reverse.\\
+  Make them deliberately.}
+
+\begin{preface}
+% TODO: preface text
+\end{preface}
+
+\tableofcontents
+
+% ============================================================
+\mainmatter
+% ============================================================
+
+%% ---- PART 1: Building an Agent Framework from Scratch -----
+\part{Building an Agent Framework from Scratch}
+\label{part:framework}
+
+\chapter{Design Principles Before Writing Code}
+\label{ch:design-principles-before-writing-code}
+\input{Tex/chapters/chapter01}
+
+\chapter{Architecting the Core Runtime}
+\label{ch:core-runtime}
+\input{Tex/chapters/chapter02}
+
+\chapter{Implementing Memory, Tools, and Orchestration}
+\label{ch:memory-tools-orchestration}
+\input{Tex/chapters/chapter03}
+
+\chapter{Implementing the Protocol Stack}
+\label{ch:protocol-stack}
+\input{Tex/chapters/chapter04}
+
+\partclose{End of Part~1 --- The framework is built.
+Parts~2 through~4 make it production-ready.}
+
+%% ---- PART 2: Infrastructure for Distributed Agent Systems -
+\part{Infrastructure for Distributed Agent Systems}
+\label{part:infrastructure}
+
+\chapter{The Agent Control Plane}
+\label{ch:control-plane}
+\input{Tex/chapters/chapter05}
+
+\chapter{Sandboxing and Isolation}
+\label{ch:sandboxing}
+\input{Tex/chapters/chapter06}
+
+\chapter{Messaging and Event-Driven Coordination}
+\label{ch:messaging}
+\input{Tex/chapters/chapter07}
+
+\chapter{Event Sourcing for Agent State}
+\label{ch:event-sourcing}
+\input{Tex/chapters/chapter08}
+
+\chapter{Deploying Agents on Kubernetes}
+\label{ch:kubernetes}
+\input{Tex/chapters/chapter09}
+
+\chapter{Multi-Cloud and Hybrid Deployments}
+\label{ch:multi-cloud}
+\input{Tex/chapters/chapter10}
+
+\chapter{Sustainability and Cost Efficiency}
+\label{ch:sustainability}
+\input{Tex/chapters/chapter11}
+
+\partclose{End of Part~2 --- The framework scales.
+Part~3 makes it observable, measurable, and testable.}
+
+%% ---- PART 3: Observability, Evaluation, and Testing -------
+\part{Observability, Evaluation, and Testing}
+\label{part:observability}
+
+\chapter{Observability: Tracing, Logging, and Metrics}
+\label{ch:observability}
+\input{Tex/chapters/chapter12}
+
+\chapter{Evaluation Frameworks and Quality Gates}
+\label{ch:evaluation}
+\input{Tex/chapters/chapter13}
+
+\chapter{Explainability and Trajectory Reconstruction}
+\label{ch:explainability}
+\input{Tex/chapters/chapter14}
+
+\chapter{Simulation and Synthetic Testing}
+\label{ch:simulation}
+\input{Tex/chapters/chapter15}
+
+\chapter{Replay and Deterministic Debugging}
+\label{ch:replay}
+\input{Tex/chapters/chapter16}
+
+\chapter{Cost Modelling and Budget Control}
+\label{ch:cost-modelling}
+\input{Tex/chapters/chapter17}
+
+\partclose{End of Part~3 --- The framework is observable and testable.
+Part~4 secures it.}
+
+%% ---- PART 4: Security and Governance ----------------------
+\part{Security and Governance}
+\label{part:security}
+
+\chapter{The Agent Threat Landscape}
+\label{ch:threat-landscape}
+\input{Tex/chapters/chapter18}
+
+\chapter{Secure by Design}
+\label{ch:secure-by-design}
+\input{Tex/chapters/chapter19}
+
+\chapter{Enterprise Governance}
+\label{ch:enterprise-governance}
+\input{Tex/chapters/chapter20}
+
+\chapter{Runtime Security Monitoring}
+\label{ch:runtime-security}
+\input{Tex/chapters/chapter21}
+
+\partclose{End of Part~4 --- The framework is secure.
+Part~5 puts it to work.}
+
+%% ---- PART 5: Production Agent Architectures ---------------
+\part{Production Agent Architectures}
+\label{part:production-architectures}
+
+\chapter{The Enterprise Copilot}
+\label{ch:enterprise-copilot}
+\input{Tex/chapters/chapter22}
+
+\chapter{The Autonomous Research Agent}
+\label{ch:research-agent}
+\input{Tex/chapters/chapter23}
+
+\chapter{The Multi-Agent Pipeline}
+\label{ch:multi-agent-pipeline}
+\input{Tex/chapters/chapter24}
+
+\chapter{The HITL Approval Workflow Agent}
+\label{ch:hitl-workflow}
+\input{Tex/chapters/chapter25}
+
+\chapter{The RAG-Augmented Knowledge Agent}
+\label{ch:rag-knowledge-agent}
+\input{Tex/chapters/chapter26}
+
+\chapter{The Code Generation Agent}
+\label{ch:code-generation-agent}
+\input{Tex/chapters/chapter27}
+
+\chapter{The Autonomous Operations Agent}
+\label{ch:operations-agent}
+\input{Tex/chapters/chapter28}
+
+\partclose{End of Part~5 --- Architecture applied.
+Part~6 looks ahead.}
+
+%% ---- PART 6: The Future of Agentic AI --------------------
+\part{The Future of Agentic AI}
+\label{part:future}
+
+\chapter{Emerging Architectures}\label{ch:emerging-architectures}
+\input{Tex/chapters/chapter29}
+
+\chapter{The Agent Ecosystem}\label{ch:agent-ecosystem}
+\input{Tex/chapters/chapter30}
+
+\chapter{Open Problems and Research Directions}\label{ch:open-problems}
+\input{Tex/chapters/chapter31}
+
+\chapter{Towards Trustworthy Agents}\label{ch:trustworthy-agents}
+\input{Tex/chapters/chapter32}
+
+\chapter{Agent--Human Collaboration}\label{ch:agent-human-collaboration}
+\input{Tex/chapters/chapter33}
+
+\chapter{Regulation and Compliance Horizons}\label{ch:regulation-compliance}
+\input{Tex/chapters/chapter34}
+
+\chapter{The Economics of Agentic Systems}\label{ch:economics}
+\input{Tex/chapters/chapter35}
+
+\chapter{Closing Perspectives}\label{ch:closing-perspectives}
+\input{Tex/chapters/chapter36}
+
+\chapter{What Comes Next}\label{ch:what-comes-next}
+\input{Tex/chapters/chapter37}
+
+% ============================================================
+\backmatter
+% ============================================================
+
+\printindex
+
+\end{document}

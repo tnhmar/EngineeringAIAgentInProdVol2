@@ -1,0 +1,59 @@
+# ============================================================
+#  Build LaTeX — Engineering AI Agents for Production Vol. 2
+#  Evaluation notes vs. original proposed CI:
+#
+#  FIXED (3 issues):
+#  1. Entry point: original used `main.tex` at root. Our file
+#     is at `Tex/main.tex` — latexmk must run from repo root
+#     and reference Tex/main.tex explicitly.
+#  2. XeLaTeX: volume2.tex declares `%!TEX program = xelatex`
+#     and uses fontspec/polyglossia. latexmk flag must be
+#     -xelatex, not -pdf (which defaults to pdflatex).
+#  3. Output dir: -outdir path must be relative to the .tex
+#     file's location for latexmk aux files; we use
+#     -output-directory=Output and cd into Tex/ first.
+#
+#  KEPT:
+#  - xu-cheng/texlive-action@v2 with scheme: full  (correct)
+#  - actions/checkout@v4                            (correct)
+#  - actions/upload-artifact@v4                     (correct)
+#  - Trigger on push + pull_request                 (correct)
+# ============================================================
+name: Build LaTeX to PDF
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create output directory
+        run: mkdir -p Tex/Output
+
+      - name: Compile LaTeX (XeLaTeX via latexmk)
+        uses: xu-cheng/texlive-action@v2
+        with:
+          scheme: full
+          run: |
+            cd Tex
+            latexmk \
+              -xelatex \
+              -interaction=nonstopmode \
+              -halt-on-error \
+              -output-directory=Output \
+              main.tex
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-pdf
+          path: Tex/Output/main.pdf
+          if-no-files-found: error

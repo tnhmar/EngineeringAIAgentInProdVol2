@@ -1,0 +1,581 @@
+%% ============================================================
+%%  CHAPTER 1 — Design Principles Before Writing Code
+%%  Status: DONE — reviewed, all fixes applied.
+%%  \chapter{} + \label{} declared in main.tex.
+%%  All listings extracted verbatim from
+%%  github.com/tnhmar/production-agent-framework- @ 59defc3
+%% ============================================================
+
+\chapterquote{%
+  An interface is a promise made in public.
+  Break it and you break every caller you have ever had.%
+}{---}
+
+%% ------------------------------------------------------------
+\section{Before You Build: The Failure Modes}
+\label{sec:failure-modes}
+
+Production agent systems fail in a small, repeatable set of ways.
+Understanding them \emph{before} writing a line of implementation
+code is the most leverage a designer has.
+
+\begin{itemize}
+  \item \textbf{Unbounded loops.}  The agent re-enters
+        \textsc{Planning} indefinitely because no cycle budget is
+        enforced at the \emph{interface} level.
+  \item \textbf{Silent cost overruns.}  Token and cost tracking
+        are added as an afterthought, so
+        \lstinline{ExecutionContext} carries no budget methods.
+  \item \textbf{Untestable reasoning.}  The LLM call is
+        hardwired into a monolith; the \lstinline{Reasoning}
+        contract was never extracted, so unit tests are impossible
+        without a live API.
+  \item \textbf{Replay impossibility.}  No checkpoint interface
+        exists; post-incident forensics require re-running with
+        live side-effects.
+  \item \textbf{Stagnation blindness.}  The state machine has no
+        \lstinline{stagnantCycles} counter, so a stuck agent
+        appears ``busy'' to operators until cost limits fire.
+  \item \textbf{Tenant bleed.}  A static thread pool is shared
+        across tenants; one high-volume tenant starves every
+        other run.
+\end{itemize}
+
+\begin{learningbox}
+Every failure mode above is detectable---and preventable---at the
+interface-design stage.  The chapters that follow show \emph{how}
+this framework encodes each guard as a method signature, not as
+runtime glue.
+\end{learningbox}
+
+%% ------------------------------------------------------------
+\section{Runtime Requirements}
+\label{sec:runtime-requirements}
+
+A production agent runtime must satisfy five non-negotiable
+properties \emph{before} any feature is built on top of it.
+
+\begin{enumerate}
+  \item \textbf{Bounded execution} --- every run has a hard cycle
+        limit and token budget enforced by the context, not by
+        convention.
+  \item \textbf{Deterministic replay} --- a serialisable
+        \lstinline{Snapshot} can recreate any past run without
+        side-effects.
+  \item \textbf{Tenant isolation} --- the async thread pool is
+        \emph{instance-scoped}, not static, so per-tenant
+        executors can be injected.
+  \item \textbf{Observable lifecycle} --- every state transition
+        emits a typed event through \lstinline{EventSink} before
+        any handler runs.
+  \item \textbf{Suspension / resumption} --- the state machine
+        can park at \lstinline{SUSPENDED\_HITL} and be cleanly
+        restarted from a persisted snapshot.
+\end{enumerate}
+
+\lstinline{AgentRuntime} (Listing~\ref{lst:agentruntime}) encodes
+all five requirements directly in its constructor signatures.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={AgentRuntime --- three constructors enforce tenant
+           isolation and observability
+           (\texttt{core/AgentRuntime.java})},
+  label={lst:agentruntime}]
+public AgentRuntime(PlanValidator validator) {
+    this(validator, EventSink.noop());
+}
+
+public AgentRuntime(PlanValidator validator, EventSink events) {
+    this(validator, events, Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "agent-async");
+        t.setDaemon(true);
+        return t;
+    }));
+}
+
+/**
+ * Primary constructor --- accepts a caller-supplied executor
+ * for tenant isolation.
+ */
+public AgentRuntime(PlanValidator validator, EventSink events,
+                    ExecutorService asyncPool) {
+    this.validator = validator;
+    this.events    = events;
+    this.asyncPool = asyncPool;
+}
+\end{lstlisting}
+
+\begin{notebox}
+\lstinline{EventSink.noop()} lets unit tests instantiate
+\lstinline{AgentRuntime} with a single argument and zero
+infrastructure.  Production code injects a real sink at the
+outermost wiring layer.
+\end{notebox}
+
+%% ------------------------------------------------------------
+\section{Testability and Observability}
+\label{sec:testability-observability}
+
+Six principles shape every interface in this framework.
+Table~\ref{tbl:six-principles} lists them with the contract that
+enforces each one.
+
+\begin{table}[htbp]
+\centering
+\caption{Six design principles and their interface anchors}
+\label{tbl:six-principles}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+\textbf{Principle} & \textbf{Rationale} &
+  \textbf{Interface / type} \\
+\midrule
+Single responsibility &
+  Each collaborator does one thing; composing them is the
+  runtime's job &
+  \lstinline{Reasoning}, \lstinline{Action}, \lstinline{Memory},
+  \lstinline{Perception} \\
+Dependency inversion &
+  Callers depend on abstractions, never on implementations &
+  \lstinline{Agent.Builder} \\
+Observable by default &
+  Events are emitted at every transition &
+  \lstinline{EventSink}, \lstinline{AgentEvent} \\
+Budget-first &
+  Ceilings live in the context interface, not in callers &
+  \lstinline{ExecutionContext} \\
+Replay-safe &
+  Every mutable field is included in the integrity hash &
+  \lstinline{ExecutionContext.Snapshot} \\
+Tenant-safe &
+  Thread pools are never static &
+  \lstinline{AgentRuntime(\ldots, ExecutorService)} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{learningbox}
+Because \lstinline{Reasoning}, \lstinline{Action},
+\lstinline{Memory}, and \lstinline{Perception} are
+single-method interfaces, any test can substitute a lambda
+and never touch a network socket.
+\end{learningbox}
+
+%% ------------------------------------------------------------
+\section{Java Concurrency Models}
+\label{sec:concurrency-models}
+
+\lstinline{AgentRuntime} exposes both a synchronous path and a
+\lstinline{CompletableFuture}-based async path
+(Listing~\ref{lst:async}).
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Async execution --- result delivered via
+           CompletableFuture (\texttt{core/AgentRuntime.java})},
+  label={lst:async}]
+public CompletableFuture<ExecutionResult> executeAsync(
+        Agent agent, Task task) {
+    return CompletableFuture.supplyAsync(
+        () -> execute(agent, task), asyncPool);
+}
+
+public CompletableFuture<ExecutionResult> executeAsync(
+        Agent agent, Task task,
+        String tenantId, String userId) {
+    return CompletableFuture.supplyAsync(
+        () -> execute(agent, task, tenantId, userId), asyncPool);
+}
+\end{lstlisting}
+
+The runtime never decides scheduling policy --- it only
+\emph{respects} the pool it receives.  Inject a bounded,
+named pool per tenant; never share one across tenants.
+
+\begin{warningbox}
+Never share a single \lstinline{ExecutorService} across tenants.
+One tenant submitting thousands of short tasks will starve all
+others.  Use the three-argument constructor and inject a bounded
+pool per tenant.
+\end{warningbox}
+
+%% ------------------------------------------------------------
+\section{Interface Catalogue as an Architecture Decision}
+\label{sec:interface-catalogue}
+
+Every behavioural decision in the framework is expressed as a
+one-method interface.  The four leaf interfaces composited by
+\lstinline{Agent.Builder} are the proof.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=1.6cm and 2.4cm,
+  every node/.style={font=\small\sffamily},
+  box/.style={draw=BookBlue,rounded corners=3pt,
+              fill=TipBg,minimum width=2.6cm,
+              minimum height=0.7cm,align=center},
+  arr/.style={-{Stealth[length=5pt]},BookBlue,thick}
+]
+  \node[box] (agent)  {Agent.Builder};
+  \node[box, above right=of agent] (perc) {Perception};
+  \node[box, right=of agent]       (reas) {Reasoning};
+  \node[box, below right=of agent] (act)  {Action};
+  \node[box, below=of act]         (mem)  {Memory};
+  \node[box, right=3.2cm of reas]  (ec)   {ExecutionContext};
+  \node[box, right=of ec]          (sn)   {Snapshot};
+
+  \draw[arr] (agent) -- node[above,sloped]{\tiny perception} (perc);
+  \draw[arr] (agent) -- node[above]{\tiny reasoning} (reas);
+  \draw[arr] (agent) -- node[below,sloped]{\tiny action} (act);
+  \draw[arr] (agent) -- node[right]{\tiny memory} (mem);
+  \draw[arr] (reas)  -- node[above]{\tiny decide(ctx,obs)} (ec);
+  \draw[arr] (act)   -- node[below,sloped]{\tiny execute(dec,ctx)} (ec);
+  \draw[arr] (ec)    -- node[above]{\tiny checkpoint()} (sn);
+\end{tikzpicture}
+\caption{Fig~1.1 --- Interface dependency map.
+  \texttt{Agent.Builder} composes four leaf contracts;
+  \texttt{ExecutionContext} is the shared mutable spine.}
+\label{fig:interface-map}
+\end{figure}
+
+\subsection{The \texttt{Agent} Composite}
+\label{subsec:agent-composite}
+
+\lstinline{Agent} (Listing~\ref{lst:agent}) is a pure value
+object.  It holds \emph{no mutable state}; all state lives in
+\lstinline{ExecutionContext}.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Agent --- validated composite of four interface slots
+           (\texttt{core/Agent.java})},
+  label={lst:agent}]
+public final class Agent {
+    private final String     name;
+    private final Perception perception;
+    private final Reasoning  reasoning;
+    private final Action     action;
+    private final Memory     memory;
+
+    private Agent(Builder b) {
+        name=b.name; perception=b.perception;
+        reasoning=b.reasoning;
+        action=b.action; memory=b.memory;
+    }
+    public static class Builder {
+        public Agent build() {
+            Objects.requireNonNull(perception, "perception");
+            Objects.requireNonNull(reasoning,  "reasoning");
+            Objects.requireNonNull(action,     "action");
+            Objects.requireNonNull(memory,     "memory");
+            return new Agent(this);
+        }
+    }
+}
+\end{lstlisting}
+
+\subsection{Reasoning and Action}
+\label{subsec:reasoning-action}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={Reasoning and Action --- one method each
+           (\texttt{reasoning/Reasoning.java},
+            \texttt{action/Action.java})},
+  label={lst:leaf-interfaces}]
+// reasoning/Reasoning.java
+public interface Reasoning {
+    Decision decide(ExecutionContext ctx, Observations obs);
+}
+
+// action/Action.java
+public interface Action {
+    ActionResult execute(Decision decision, ExecutionContext ctx);
+}
+\end{lstlisting}
+
+\begin{learningbox}
+Both interfaces are lambda-compatible (single abstract method).
+In tests: \lstinline{Reasoning stub = (ctx, obs) -> Decision.finalAnswer("ok");}
+--- no mocking framework required.
+\end{learningbox}
+
+\subsection{The \texttt{RunState} Machine}
+\label{subsec:runstate}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={RunState --- lifecycle enum with O(1) terminal
+           detection (\texttt{foundation/RunState.java})},
+  label={lst:runstate}]
+public enum RunState {
+    INITIALIZED, VALIDATING, PLANNING, MODEL_CALL,
+    TOOL_EXECUTION, MEMORY_UPDATE, RESPONDING,
+    AWAITING_RESULT, DEGRADED, SUSPENDED_HITL,
+    WAITING_FOR_JOB,
+    COMPLETED, ABORTED, TERMINATED;
+
+    public boolean isTerminal() {
+        return this == COMPLETED || this == ABORTED
+            || this == TERMINATED;
+    }
+    public boolean isLive() { return !isTerminal(); }
+}
+\end{lstlisting}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=1.0cm and 1.8cm,
+  every node/.style={font=\tiny\sffamily},
+  state/.style={draw=BookBlue,rounded corners=3pt,
+                fill=TipBg,minimum width=2.2cm,
+                minimum height=0.55cm,align=center},
+  term/.style={draw=CodeKeyword,rounded corners=3pt,
+               fill=WarningBg,minimum width=2.2cm,
+               minimum height=0.55cm,align=center},
+  arr/.style={-{Stealth[length=4pt]},BookMid}
+]
+  \node[state] (init)  {INITIALIZED};
+  \node[state, right=of init]  (val)  {VALIDATING};
+  \node[state, right=of val]   (plan) {PLANNING};
+  \node[state, right=of plan]  (mc)   {MODEL\_CALL};
+  \node[state, below=of mc]    (te)   {TOOL\_EXECUTION};
+  \node[state, left=of te]     (mu)   {MEMORY\_UPDATE};
+  \node[state, below=of plan]  (hitl) {SUSPENDED\_HITL};
+  \node[term,  below=of val]   (comp) {COMPLETED};
+  \node[term,  left=of comp]   (abrt) {ABORTED};
+  \node[term,  right=of comp]  (term) {TERMINATED};
+
+  \draw[arr] (init) -- (val);
+  \draw[arr] (val)  -- (plan);
+  \draw[arr] (plan) -- (mc);
+  \draw[arr] (mc)   -- (te);
+  \draw[arr] (te)   -- (mu);
+  \draw[arr] (mu)   edge[bend left=30] (val);
+  \draw[arr] (mc)   edge[bend left=20]
+             node[right]{\tiny respond} (comp);
+  \draw[arr] (plan) -- (hitl);
+  \draw[arr] (hitl) edge[bend right=20]
+             node[below]{\tiny resume} (plan);
+  \draw[arr] (plan) edge[bend right=10] (abrt);
+  \draw[arr] (val)  -- node[right]{\tiny limit} (term);
+\end{tikzpicture}
+\caption{Fig~1.2 --- State machine.  Terminal states (red border)
+  have no outgoing edges.  \texttt{DEGRADED} always transitions
+  to \texttt{ABORTED} (C4 spec fix).}
+\label{fig:state-machine}
+\end{figure}
+
+\subsection{Snapshot Integrity}
+\label{subsec:snapshot-integrity}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={ExecutionContext.Snapshot --- schema-versioned
+           integrity-hashed checkpoint
+           (\texttt{core/ExecutionContext.java})},
+  label={lst:snapshot}]
+interface Snapshot {
+    String                   runId();
+    RunState                 state();
+    int                      cycle();
+    String                   schemaVersion();
+    List<Goal>               goalStackSnapshot();
+    List<WorkingMemoryEntry> workingMemorySnapshot();
+    List<Belief>             beliefSnapshot();
+    int                      totalTokens();
+    BigDecimal               totalCost();
+    int                      consecutiveFailures();
+    int                      stagnantCycles();
+    int                      stuckCycles();
+    int                      revisionCount();
+    String                   integrityHash();
+}
+\end{lstlisting}
+
+\begin{notebox}
+\lstinline{schemaVersion} lets the framework evolve the snapshot
+format without invalidating snapshots in durable storage.  A
+migration adapter up-converts \texttt{v1} to \texttt{v2} before
+the integrity check runs.
+\end{notebox}
+
+%% ------------------------------------------------------------
+\section{Policy, Secrets, and Events}
+\label{sec:policy-secrets-events}
+
+\subsection{Tenant Policy Engine}
+\label{subsec:tenant-policy}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={TenantPolicy --- immutable per-tenant rule set
+           (\texttt{security/TenantPolicy.java})},
+  label={lst:tenantpolicy}]
+public record TenantPolicy(
+        String tenantId,
+        Set<String> allowedTools,
+        int maxCyclesPerRun,
+        int maxTokensPerRun,
+        boolean allowIrreversible) {
+
+    public static TenantPolicy permissive(String tenantId) {
+        return new TenantPolicy(tenantId, Set.of(),
+            Integer.MAX_VALUE, Integer.MAX_VALUE, true);
+    }
+    public static TenantPolicy restricted(
+            String tenantId, Set<String> tools) {
+        return new TenantPolicy(tenantId, tools, 20, 50_000, false);
+    }
+    public boolean toolAllowed(String toolName) {
+        return allowedTools.isEmpty()
+            || allowedTools.contains(toolName);
+    }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={TenantPolicyEngine.check() --- switch on sealed
+           Decision (\texttt{security/TenantPolicyEngine.java})},
+  label={lst:policyengine}]
+public ValidationVerdict check(
+        String tenantId, Decision decision) {
+    TenantPolicy p = get(tenantId);
+    return switch (decision) {
+        case ToolCall tc -> {
+            if (!p.toolAllowed(tc.toolName()))
+                yield ValidationVerdict.failed(
+                    "Tool not allowed: " + tc.toolName());
+            yield ValidationVerdict.ok();
+        }
+        case ParallelToolCalls ptc -> {
+            for (ToolCall tc : ptc.calls())
+                if (!p.toolAllowed(tc.toolName()))
+                    yield ValidationVerdict.failed(
+                        "Parallel tool not allowed: "
+                        + tc.toolName());
+            yield ValidationVerdict.ok();
+        }
+        default -> ValidationVerdict.ok();
+    };
+}
+\end{lstlisting}
+
+\subsection{Event Taxonomy}
+\label{subsec:event-taxonomy}
+
+\begin{lstlisting}[
+  language=Java,
+  caption={AgentEvent.EventType --- complete observable
+           vocabulary (\texttt{observability/AgentEvent.java})},
+  label={lst:eventtypes}]
+public record AgentEvent(
+        String runId, String tenantId,
+        EventType type, Instant timestamp,
+        Map<String,Object> attributes) {
+
+    public enum EventType {
+        RUN_STARTED, RUN_COMPLETED, RUN_ABORTED,
+        CYCLE_STARTED, CYCLE_COMPLETED,
+        TOOL_CALLED, TOOL_SUCCEEDED, TOOL_FAILED,
+        PLAN_STALE, BELIEF_CONFLICT,
+        HITL_REQUESTED, HITL_RESOLVED,
+        MEMORY_WRITTEN, MEMORY_RETRIEVED,
+        CONTEXT_EVICTED, RESOURCE_LIMIT_HIT,
+        HOSTILE_TAINT_DETECTED,
+        GOAL_STAGNATION_DETECTED,
+        STUCK_STATE_DETECTED,
+        DELEGATION_DEPTH_EXCEEDED
+    }
+}
+\end{lstlisting}
+
+\begin{learningbox}
+All observability (Part~3) and security (Part~4) chapters
+subscribe to \lstinline{AgentEvent.EventType} --- never to
+free-form log strings.  Adding a new observable behaviour means
+adding one enum constant and one \lstinline{emit()} call.
+\end{learningbox}
+
+%% ------------------------------------------------------------
+\section{A Run from First Call to Final State}
+\label{sec:run-walkthrough}
+
+With all contracts in place, the run loop is a straightforward
+orchestration.  Listing~\ref{lst:smr-planning} shows the
+\lstinline{PLANNING} step from
+\lstinline{StateMachineRunner.step()}.
+
+\begin{lstlisting}[
+  language=Java,
+  caption={StateMachineRunner --- PLANNING step orchestration
+           (\texttt{core/StateMachineRunner.java})},
+  label={lst:smr-planning}]
+case PLANNING -> {
+    emit(ctx, AgentEvent.EventType.CYCLE_STARTED,
+        Map.of("cycle", ctx.cycleCount()));
+
+    Observations obs = agent.perception().perceive(ctx);
+    ctx.transitionTo(RunState.MODEL_CALL);
+    Decision decision = agent.reasoning().decide(ctx, obs);
+    ctx.transitionTo(RunState.PLANNING);
+
+    ValidationResult validation =
+        validator.validate(decision, ctx);
+    switch (validation) {
+        case ValidationResult.Passed p -> {
+            ctx.transitionTo(RunState.TOOL_EXECUTION);
+            ActionResult result =
+                agent.action().execute(decision, ctx);
+            ctx.transitionTo(RunState.MEMORY_UPDATE);
+            new Review(validator, events, taintClassifier)
+                .step(result, decision, obs, ctx, agent);
+            ctx.recordCycle(CycleRecord.of(
+                ctx.cycleCount(), obs, decision,
+                result, "ok"));
+            ctx.incrementCycle();
+            if (!ctx.currentState().isTerminal())
+                ctx.transitionTo(RunState.VALIDATING);
+        }
+        case ValidationResult.NeedsCorrection nc -> {
+            ctx.incrementRevisionCount();
+            ctx.flagPlanStale(nc.reason());
+            ctx.transitionTo(RunState.VALIDATING);
+        }
+        case ValidationResult.Failed f ->
+            terminate(ctx,
+                new TerminationReason.PlanIncoherent(
+                    f.reason()),
+                AgentEvent.EventType.PLAN_STALE,
+                Map.of("reason", f.reason()));
+    }
+}
+\end{lstlisting}
+
+\begin{notebox}
+\lstinline{DEGRADED} always transitions to \lstinline{ABORTED},
+never to \lstinline{TERMINATED} (C4 spec fix, Vol.~1 Ch.~8).
+\end{notebox}
+
+\begin{takeawaybox}{Chapter 1 Takeaways}
+\begin{itemize}
+  \item Define interfaces before implementations --- every failure
+        mode maps to a missing method signature.
+  \item \lstinline{Agent} is stateless; all mutable state lives
+        in \lstinline{ExecutionContext}.
+  \item Thread pools are injected, never static --- full
+        tenant-isolation story for async runs.
+  \item Every checkpoint is integrity-hashed over all liveness
+        counters; replay rejects tampered snapshots.
+  \item Four one-method interfaces make every behaviour
+        unit-testable with a lambda.
+  \item \lstinline{TenantPolicy} is immutable and factory-built;
+        \lstinline{TenantPolicyEngine.check()} uses an exhaustive
+        sealed-class switch.
+  \item \lstinline{AgentEvent.EventType} is the single vocabulary
+        for all observability, alerting, and audit logging.
+\end{itemize}
+\end{takeawaybox}
