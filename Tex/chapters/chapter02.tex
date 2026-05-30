@@ -1,6 +1,6 @@
 %% ============================================================
 %%  CHAPTER 2 — Architecting the Core Runtime
-%%  Status: DONE — written per edit plan Section 4, Chapter 2.
+%%  Status: DONE — reviewed, all fixes applied.
 %%  \chapter{} + \label{} declared in main.tex.
 %%  All listings extracted from
 %%  github.com/tnhmar/production-agent-framework- @ 50be372
@@ -12,6 +12,13 @@ is a trap.}{---}
 %% ------------------------------------------------------------
 \section{From Interfaces to Motion}
 \label{sec:ch2-intro}
+
+\begin{learningbox}
+After this section you will understand why \lstinline{StateMachineRunner}
+is the sole orchestrator of the \lstinline{RunState} machine and
+how it delegates every substantive decision to its injected
+collaborators.
+\end{learningbox}
 
 Chapter~1 established the \emph{interfaces} that govern every
 behavioural decision: \lstinline{Reasoning}, \lstinline{Action},
@@ -28,18 +35,16 @@ Understanding its internal structure is the prerequisite for every
 production concern addressed in later chapters: liveness detection,
 HITL suspension, deterministic replay, and multi-tenant isolation.
 
-\begin{learningbox}
-After this chapter you will be able to: trace every transition in
-the \lstinline{RunState} table; explain why \lstinline{DEGRADED}
-must go to \lstinline{ABORTED} rather than \lstinline{TERMINATED};
-describe the two-phase model that separates action execution from
-post-action review; and identify exactly what the run loop
-delegates rather than doing itself.
-\end{learningbox}
-
 %% ------------------------------------------------------------
 \section{The State Transition Table}
 \label{sec:state-transition-table}
+
+\begin{learningbox}
+After this section you will be able to enumerate every legal
+\lstinline{RunState} transition, its trigger, and the event it
+emits --- and explain the C4 spec fix that routes
+\lstinline{DEGRADED} to \lstinline{ABORTED}.
+\end{learningbox}
 
 Table~\ref{tbl:state-transitions} enumerates every legal
 transition, its trigger, and the event emitted.
@@ -52,26 +57,26 @@ detects them in O(1) and exits cleanly.
 \centering
 \caption{State transition table --- \texttt{StateMachineRunner} (Table~2.1)}
 \label{tbl:state-transitions}
-\begin{tabularx}{\textwidth}{llXl}
+\begin{tabularx}{\textwidth}{p{2.5cm} p{2.5cm} X p{4.0cm}}
 \toprule
 \textbf{From} & \textbf{To} & \textbf{Trigger} & \textbf{Event emitted} \\
 \midrule
-\textsc{initialized}   & \textsc{validating}    & Root goal pushed to goal stack & --- \\
-\textsc{initialized}   & \textsc{terminated}    & Delegation depth exceeds limit & \lstinline{DELEGATION\_DEPTH\_EXCEEDED} \\
-\textsc{validating}    & \textsc{planning}      & All resource limits pass       & --- \\
-\textsc{validating}    & \textsc{terminated}    & Cycle, token, wall-clock, or budget limit hit & \lstinline{RESOURCE\_LIMIT\_HIT} \\
-\textsc{planning}      & \textsc{model\_call}   & Perception complete; reasoning begins & --- \\
-\textsc{model\_call}   & \textsc{planning}      & Decision returned by reasoning & --- \\
-\textsc{planning}      & \textsc{tool\_execution} & Validation passed            & --- \\
-\textsc{tool\_execution} & \textsc{memory\_update} & Action completed             & --- \\
-\textsc{memory\_update} & \textsc{validating}    & Review complete, run still live & \lstinline{CYCLE\_COMPLETED} \\
-\textsc{planning}      & \textsc{validating}    & Validation needs correction (revision budget not exceeded) & \lstinline{PLAN\_STALE} \\
-\textsc{planning}      & \textsc{terminated}    & Validation failed or revision budget exhausted & \lstinline{PLAN\_STALE} \\
-\textsc{planning}      & \textsc{terminated}    & Stuck state detected           & \lstinline{STUCK\_STATE\_DETECTED} \\
-\textsc{planning}      & \textsc{terminated}    & Goal stagnation detected       & \lstinline{GOAL\_STAGNATION\_DETECTED} \\
-\textsc{planning}      & \textsc{completed}     & Root goal achieved or FinalAnswer & --- \\
-\textsc{planning}      & \textsc{suspended\_hitl} & Escalation requested         & \lstinline{HITL\_REQUESTED} \\
-\textsc{degraded}      & \textsc{aborted}       & C4 spec fix: degraded runs must be explicitly aborted & \lstinline{RUN\_ABORTED} \\
+\textsc{initialized}   & \textsc{validating}      & Root goal pushed to goal stack                            & ---                                        \\
+\textsc{initialized}   & \textsc{terminated}      & Delegation depth exceeds limit                            & \lstinline{DELEGATION\_DEPTH\_EXCEEDED}    \\
+\textsc{validating}    & \textsc{planning}        & All resource limits pass                                  & ---                                        \\
+\textsc{validating}    & \textsc{terminated}      & Cycle, token, wall-clock, or budget limit hit             & \lstinline{RESOURCE\_LIMIT\_HIT}           \\
+\textsc{planning}      & \textsc{model\_call}    & Perception complete; reasoning begins                     & ---                                        \\
+\textsc{model\_call}   & \textsc{planning}        & Decision returned by reasoning                            & ---                                        \\
+\textsc{planning}      & \textsc{tool\_exec.}   & Validation passed                                         & ---                                        \\
+\textsc{tool\_exec.}  & \textsc{memory\_upd.}  & Action completed                                          & ---                                        \\
+\textsc{memory\_upd.} & \textsc{validating}      & Review complete, run still live                           & \lstinline{CYCLE\_COMPLETED}               \\
+\textsc{planning}      & \textsc{validating}      & Validation needs correction (budget not exceeded)         & \lstinline{PLAN\_STALE}                    \\
+\textsc{planning}      & \textsc{terminated}      & Validation failed or revision budget exhausted            & \lstinline{PLAN\_STALE}                    \\
+\textsc{planning}      & \textsc{terminated}      & Stuck state detected                                      & \lstinline{STUCK\_STATE\_DETECTED}         \\
+\textsc{planning}      & \textsc{terminated}      & Goal stagnation detected                                  & \lstinline{GOAL\_STAGNATION\_DETECTED}     \\
+\textsc{planning}      & \textsc{completed}       & Root goal achieved or FinalAnswer                         & ---                                        \\
+\textsc{planning}      & \textsc{susp.\_hitl}   & Escalation requested                                      & \lstinline{HITL\_REQUESTED}                \\
+\textsc{degraded}      & \textsc{aborted}         & C4 fix: degraded runs must be explicitly aborted          & \lstinline{RUN\_ABORTED}                   \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -80,7 +85,7 @@ detects them in O(1) and exits cleanly.
 The C4 specification (Vol.~1, Ch.~8) states: ``There is no
 transition from \lstinline{DEGRADED} directly to
 \lstinline{TERMINATED} --- a degraded run must either recover or be
-explicitly aborted.''  The\linebreak \lstinline{DEGRADED} case in
+explicitly aborted.''  The \lstinline{DEGRADED} case in
 \lstinline{StateMachineRunner.step()} calls the dedicated
 \lstinline{abort()} helper, which sets \lstinline{ABORTED} rather
 than \lstinline{TERMINATED}.  This resolves the
@@ -91,6 +96,13 @@ state/event contradiction where the state said
 %% ------------------------------------------------------------
 \section{The Run Loop}
 \label{sec:run-loop}
+
+\begin{learningbox}
+After this section you will be able to explain why the outer
+\lstinline{while} loop contains no branching logic and how any
+collaborator stops the run by calling \lstinline{ctx.transitionTo()}
+rather than by throwing.
+\end{learningbox}
 
 The outermost loop is intentionally minimal
 (Listing~\ref{lst:run-loop}).  Every early-exit, retry, and
@@ -119,6 +131,7 @@ private void step(Agent agent, ExecutionContext ctx) {
     }
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.StateMachineRunner}
 
 The \lstinline{isLive()} check on \lstinline{RunState} costs a
 single equality test against three constants --- no exception path,
@@ -130,6 +143,13 @@ exits cleanly on its next iteration.
 %% ------------------------------------------------------------
 \section{INITIALIZED and VALIDATING}
 \label{sec:init-validating}
+
+\begin{learningbox}
+After this section you will be able to describe the two jobs of
+the \lstinline{INITIALIZED} step and explain why resource limits
+are checked in \lstinline{VALIDATING} rather than inside
+\lstinline{PLANNING}.
+\end{learningbox}
 
 The \lstinline{INITIALIZED} step has two jobs: guard against
 delegation-depth abuse and push the root goal onto the goal stack
@@ -158,6 +178,7 @@ case INITIALIZED -> {
     ctx.transitionTo(RunState.VALIDATING);
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.StateMachineRunner}
 
 \lstinline{VALIDATING} calls \lstinline{checkResourceLimits()}
 before every cycle.  Checking limits here --- rather than inside
@@ -169,6 +190,12 @@ from the \lstinline{Task} value object; none are hardcoded.
 %% ------------------------------------------------------------
 \section{The PLANNING Step in Full}
 \label{sec:planning-step}
+
+\begin{learningbox}
+After this section you will be able to trace the full PLANNING
+sequence from stale-plan injection through perception, decision,
+stuck-state check, and validation branch.
+\end{learningbox}
 
 The \lstinline{PLANNING} case is the heart of the runner.  Its
 sequence is: detect a stale plan; emit \lstinline{CYCLE\_STARTED};
@@ -184,7 +211,6 @@ validate; then branch on the validation outcome
            (\texttt{core/StateMachineRunner.java})},
   label={lst:planning-step}]
 case PLANNING -> {
-    // Stale-plan injection before perception
     if (ctx.isPlanStale()) {
         ctx.workingMemory().add(new WorkingMemoryEntry(
             UUID.randomUUID().toString(),
@@ -196,18 +222,14 @@ case PLANNING -> {
     }
     emit(ctx, AgentEvent.EventType.CYCLE_STARTED,
         Map.of("cycle", ctx.cycleCount()));
-
     Observations obs      = agent.perception().perceive(ctx);
     ctx.transitionTo(RunState.MODEL_CALL);
     Decision     decision = agent.reasoning().decide(ctx, obs);
     ctx.transitionTo(RunState.PLANNING);
-
-    // Stuck-state check: same decision, no goal progress
     liveness.checkStuck(decision, ctx).ifPresent(reason ->
         terminate(ctx, reason,
-            AgentEvent.EventType.STUCK_STATE_DETECTED, ...));
+            AgentEvent.EventType.STUCK_STATE_DETECTED, Map.of()));
     if (!ctx.currentState().isLive()) return;
-
     ValidationResult validation = validator.validate(decision, ctx);
     switch (validation) {
         case ValidationResult.Passed p      -> executeAndReview(...);
@@ -216,6 +238,7 @@ case PLANNING -> {
     }
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.StateMachineRunner}
 
 \subsection{Liveness Checks Inside PLANNING}
 \label{subsec:liveness-inside-planning}
@@ -229,24 +252,29 @@ and flags a run as stagnant if the hash is identical across
 configurable cycle thresholds.
 
 Both checks return \lstinline{Optional<TerminationReason>}.
-Using \lstinline{Optional} rather than throwing an exception is
-deliberate: it keeps the control flow linear, avoids a
-catch block in the middle of a multi-step step case, and
-makes the calling code self-documenting.
+Using \lstinline{Optional} rather than throwing is deliberate: it
+keeps the control flow linear, avoids a catch block in the middle
+of the step case, and makes the calling code self-documenting.
 
 %% ------------------------------------------------------------
 \section{The Two-Phase Model}
 \label{sec:two-phase-model}
 
+\begin{learningbox}
+After this section you will be able to describe the execute-then-review
+split and explain why taint classification must run before the
+result is written to working memory.
+\end{learningbox}
+
 The name ``PLANNING'' is slightly misleading: the PLANNING
 state \emph{also} performs the action, then hands off to
 \lstinline{Review} for post-action processing.  This two-phase
-structure --- \emph{execute-then-review} --- is not an
-accident of implementation.  It is a deliberate design choice that
-keeps each concern in a single class.
+structure --- \emph{execute-then-review} --- is a deliberate design
+choice that keeps each concern in a single class.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   node distance=0.9cm and 2.2cm,
   every node/.style={font=\small\sffamily},
@@ -263,13 +291,14 @@ keeps each concern in a single class.
   \node[box, right=2.4cm of plan]  (exec) {execute(decision,ctx)};
   \node[box, right=2.4cm of exec]  (rev)  {Review.step()};
   \node[side, below=of plan] (val)  {validate(decision,ctx)};
-  \node[side, below=of rev]  (mem)  {workingMemory\,.add()};
+  \node[side, below=of rev]  (mem)  {workingMemory.add()};
 
   \draw[arr]  (plan) -- node[above]{\small pass}  (exec);
   \draw[arr]  (exec) -- node[above]{\small result} (rev);
   \draw[darr] (plan) -- (val);
   \draw[darr] (rev)  -- (mem);
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \caption{Fig~2.1 --- Two-phase model.  \texttt{StateMachineRunner}
   owns the \emph{execute} phase; \texttt{Review} owns the
   \emph{review} phase.  Both phases write to
@@ -297,11 +326,12 @@ on the next \lstinline{isLive()} check.
 \subsection{Why Taint Fires First}
 \label{subsec:taint-first}
 
-The taint classifier runs \emph{before} the result is written to
-working memory (Listing~\ref{lst:review-excerpt}).  This ordering
-guarantees that a hostile payload cannot reach the memory store.
-The cost is one extra string scan per action; the benefit is that
-a prompt-injection attempt embedded in a tool response is flagged
+The taint classifier\marginpar{\footnotesize Vol.~1, Ch.~7} runs
+\emph{before} the result is written to working memory
+(Listing~\ref{lst:review-excerpt}).  This ordering guarantees that
+a hostile payload cannot reach the memory store.  The cost is one
+extra string scan per action; the benefit is that a
+prompt-injection attempt embedded in a tool response is flagged
 and emitted as \lstinline{HOSTILE\_TAINT\_DETECTED} before any
 subsequent reasoning cycle can read it.
 
@@ -313,23 +343,19 @@ subsequent reasoning cycle can read it.
 void step(ActionResult result, Decision decision,
           Observations obs, ExecutionContext ctx,
           Agent agent) {
-
     // Phase 2a: classify BEFORE writing to memory
     TaintLabel taint   = classifyResultTaint(result);
     String     summary = summarize(result);
-
     ctx.workingMemory().add(new WorkingMemoryEntry(
         UUID.randomUUID().toString(), summary,
         WorkingMemoryTier.ACTIVE, Origin.TOOL, 0.9,
-        Instant.now(), taint));           // label travels with entry
-
+        Instant.now(), taint));
     if (taint == TaintLabel.HOSTILE) {
         events.emit(new AgentEvent(ctx.runId(), ctx.tenantId(),
             AgentEvent.EventType.HOSTILE_TAINT_DETECTED,
-            Instant.now(), Map.of("summary", summary
-                .substring(0, Math.min(200, summary.length())))));
+            Instant.now(), Map.of("summary",
+                summary.substring(0, Math.min(200, summary.length())))));
     }
-
     // Phase 2b..2f: context window, goals, beliefs, memory, termination
     ctxManager.manage(ctx.workingMemory(), ctx.task().maxTokens());
     updateGoals(result, decision, ctx);
@@ -337,10 +363,18 @@ void step(ActionResult result, Decision decision,
     // long-term write-back and termination check follow ...
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.Review}
 
 %% ------------------------------------------------------------
 \section{Interrupts and the StepExecutionException Design}
 \label{sec:interrupt-narrative}
+
+\begin{learningbox}
+After this section you will be able to distinguish internal
+interrupts (resource limits, stuck states) handled by
+\lstinline{terminate()} from external interrupts (HITL,
+Async\-Agent\-Runtime) that require an external snapshot holder.
+\end{learningbox}
 
 A run can be interrupted by two classes of signal: \emph{resource
 limits} detected by the runner itself, and \emph{external
@@ -360,8 +394,7 @@ described in Table~\ref{tbl:state-transitions}).
   caption={terminate() and abort() --- two distinct exit
            contracts (\texttt{core/StateMachineRunner.java})},
   label={lst:terminate-abort}]
-// TERMINATED: resource limits, stuck, incoherence,
-//             delegation depth
+// TERMINATED: resource limits, stuck, incoherence, delegation depth
 private void terminate(ExecutionContext ctx,
         TerminationReason reason,
         AgentEvent.EventType eventType,
@@ -372,8 +405,7 @@ private void terminate(ExecutionContext ctx,
 }
 
 // ABORTED: DEGRADED escalation only.
-// Spec: "a degraded run must either recover or be
-//        explicitly aborted."
+// Spec: "a degraded run must either recover or be explicitly aborted."
 private void abort(ExecutionContext ctx,
         TerminationReason reason,
         AgentEvent.EventType eventType,
@@ -383,10 +415,11 @@ private void abort(ExecutionContext ctx,
     emit(ctx, eventType, attrs);
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.StateMachineRunner}
 
 Calling \lstinline{terminate()} inside \lstinline{PLANNING} does
-not throw.  The next statement in the switch arm typically returns
-early, and the outer \lstinline{while} exits on the next
+not throw.  The next statement in the switch arm returns early,
+and the outer \lstinline{while} exits on the next
 \lstinline{isLive()} check.  There is no exception unwinding,
 no flag race, and no possibility of a partial state transition
 leaking out to callers.
@@ -406,6 +439,7 @@ itself never parks --- it always runs to a terminal state and returns.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   node distance=0.85cm and 1.8cm,
   every node/.style={font=\tiny\sffamily},
@@ -434,10 +468,11 @@ itself never parks --- it always runs to a terminal state and returns.
               node[left]{\tiny DEGRADED} (abrt);
   \draw[darr] (plan) -- node[right]{\tiny Escalate} (hitl);
   \draw[darr] (hitl) -- node[above]{\tiny checkpoint()} (async);
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \caption{Fig~2.2 --- Interrupt topology.
   Solid arrows are transitions owned by \texttt{StateMachineRunner};
-  dashed arrows are transitions that require an external holder
+  dashed arrows require an external holder
   (\texttt{AsyncAgentRuntime}) to persist the suspension point.}
 \label{fig:interrupt-topology}
 \end{figure}
@@ -445,6 +480,12 @@ itself never parks --- it always runs to a terminal state and returns.
 %% ------------------------------------------------------------
 \section{What the Loop Does Not Do}
 \label{sec:what-loop-does-not-do}
+
+\begin{learningbox}
+After this section you will be able to name the six concerns
+that \lstinline{StateMachineRunner} explicitly refuses to own and
+identify the collaborator responsible for each one.
+\end{learningbox}
 
 \begin{notebox}
 \textbf{What \texttt{StateMachineRunner} deliberately does not do:}
@@ -486,6 +527,12 @@ socket, a database, or a real language model.
 \section{Replay: Re-entering the Loop from a Snapshot}
 \label{sec:replay}
 
+\begin{learningbox}
+After this section you will be able to describe the three steps
+of deterministic replay and explain why the integrity check must
+run before any side-effecting code.
+\end{learningbox}
+
 Deterministic replay, introduced in Chapter~1 as runtime
 requirement~2, is implemented in \lstinline{AgentRuntime.replay()}.
 The method does three things: verify the integrity hash, build a
@@ -502,30 +549,26 @@ snapshot before handing it to \lstinline{StateMachineRunner}
 public ExecutionResult replay(
         ExecutionContext.Snapshot snapshot,
         Agent agent, String tenantId, String userId) {
-
     verifyIntegrity(snapshot);        // throws on hash mismatch
     Task replayTask = buildReplayTask(snapshot);
     DefaultExecutionContext ctx =
         new DefaultExecutionContext(replayTask, tenantId, userId);
     ctx.restoreFromSnapshot(snapshot);
-
     emit(ctx, AgentEvent.EventType.RUN_STARTED, Map.of(
         "instruction", replayTask.instruction(),
         "replayFrom",  snapshot.cycle()));
-
     new StateMachineRunner(validator, events).run(agent, ctx);
     emit(ctx, AgentEvent.EventType.RUN_COMPLETED,
         Map.of("state", ctx.currentState().name()));
     return ExecutionResult.from(ctx);
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.AgentRuntime}
 
 \lstinline{verifyIntegrity()} recomputes the SHA-256 hash over all
-counters included in the snapshot schema (cycle count, token total,
-cost, consecutive failures, stagnant cycles, stuck cycles, revision
-count) and throws \lstinline{IllegalArgumentException} if the stored
-hash does not match.  This means a tampered snapshot or a snapshot
-from a later schema version that adds new fields will be rejected
+counters in the snapshot schema and throws
+\lstinline{IllegalArgumentException} if the stored hash does not
+match.  A tampered or schema-mismatched snapshot is rejected
 before any side-effecting code runs.
 
 \begin{warningbox}
@@ -542,6 +585,12 @@ responsibility.
 \section{Testing the Runner in Isolation}
 \label{sec:testing-runner}
 
+\begin{learningbox}
+After this section you will be able to write a complete runner
+unit test using only lambdas and a stub validator, with no
+network, database, or live model.
+\end{learningbox}
+
 Because \lstinline{StateMachineRunner} is package-private and
 accepts all collaborators through its constructor, the full state
 machine can be exercised without any external infrastructure.
@@ -551,11 +600,9 @@ machine can be exercised without any external infrastructure.
   caption={Unit test pattern --- all transitions covered with
            lambdas and a stub validator},
   label={lst:runner-test}]
-// All transitions in Table 2.1 covered with pure lambdas
 AgentRuntime runtime = new AgentRuntime(
     new PassThroughPlanValidator(),
     EventSink.noop());
-
 Agent agent = new Agent.Builder()
     .name("test")
     .perception(ctx -> Observations.empty())
@@ -563,13 +610,11 @@ Agent agent = new Agent.Builder()
     .action((dec, ctx) -> ActionResult.success(ToolResult.of("ok")))
     .memory(MemoryAdapter.noop())
     .build();
-
 Task task = Task.builder()
     .instruction("test")
     .maxCycles(5)
     .maxTokens(10_000)
     .build();
-
 ExecutionResult result = runtime.execute(agent, task);
 assertEquals(RunState.COMPLETED, result.finalState());
 \end{lstlisting}
@@ -582,28 +627,14 @@ verify the event taxonomy from Chapter~1 in integration tests.
 \end{tipbox}
 
 \begin{takeawaybox}{Chapter 2 Takeaways}
-\begin{itemize}
-  \item \lstinline{StateMachineRunner.run()} is the only entry
-        point; all exit decisions are made inside
-        \lstinline{step()} and communicated through
-        \lstinline{ctx.transitionTo()}, never by throwing.
-  \item \lstinline{DEGRADED} exits to \lstinline{ABORTED}, not
-        \lstinline{TERMINATED} --- resolving the C4 spec
-        contradiction where state and event disagreed.
-  \item The two-phase model separates
-        \emph{execute} (runner) from \emph{review}
-        (\lstinline{Review}); each phase has a single class
-        with no knowledge of the other's internals.
-  \item Taint classification runs before the result enters
-        working memory --- a hostile payload cannot reach the
-        reasoning loop.
-  \item The runner owns no scheduling, serialisation, memory
-        management, taint policy, tenant policy, or retry logic;
-        those six concerns live in six separate collaborators.
-  \item Replay integrity is enforced before any side-effecting
-        code runs; a hash mismatch throws immediately.
-  \item The entire runner is testable with lambdas and a
-        \lstinline{PassThroughPlanValidator} --- no network,
-        no database, no live model.
-\end{itemize}
+\lstinline{StateMachineRunner} is a pure orchestrator: it drives
+the \lstinline{RunState} machine through a single
+\lstinline{while~(isLive())} loop and delegates every domain
+decision---scheduling, serialisation, taint, tenant policy, and
+retry---to six injected collaborators, making the entire runtime
+testable with lambdas and a stub validator.
+The two-phase execute-then-review model, the
+\lstinline{DEGRADED}\,\textrightarrow\,\lstinline{ABORTED} C4 fix,
+and the pre-write taint check are the three design decisions that
+distinguish a production-grade loop from a na\"ive one.
 \end{takeawaybox}

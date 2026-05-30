@@ -15,6 +15,12 @@
 \section{Before You Build: The Failure Modes}
 \label{sec:failure-modes}
 
+\begin{learningbox}
+After this section you will be able to name the six recurring
+failure modes of production agent systems and map each one to a
+missing interface contract.
+\end{learningbox}
+
 Production agent systems fail in a small, repeatable set of ways.
 Understanding them \emph{before} writing a line of implementation
 code is the most leverage a designer has.
@@ -41,16 +47,22 @@ code is the most leverage a designer has.
         other run.
 \end{itemize}
 
-\begin{learningbox}
+\begin{notebox}
 Every failure mode above is detectable---and preventable---at the
 interface-design stage.  The chapters that follow show \emph{how}
 this framework encodes each guard as a method signature, not as
 runtime glue.
-\end{learningbox}
+\end{notebox}
 
 %% ------------------------------------------------------------
 \section{Runtime Requirements}
 \label{sec:runtime-requirements}
+
+\begin{learningbox}
+After this section you will be able to state the five
+non-negotiable runtime properties and identify which constructor
+argument of \lstinline{AgentRuntime} enforces each one.
+\end{learningbox}
 
 A production agent runtime must satisfy five non-negotiable
 properties \emph{before} any feature is built on top of it.
@@ -60,8 +72,8 @@ properties \emph{before} any feature is built on top of it.
         limit and token budget enforced by the context, not by
         convention.
   \item \textbf{Deterministic replay} --- a serialisable
-        \lstinline{Snapshot} can recreate any past run without
-        side-effects.
+        \lstinline{Snapshot}\marginpar{\footnotesize Vol.~1, Ch.~8}
+        can recreate any past run without side-effects.
   \item \textbf{Tenant isolation} --- the async thread pool is
         \emph{instance-scoped}, not static, so per-tenant
         executors can be injected.
@@ -105,6 +117,7 @@ public AgentRuntime(PlanValidator validator, EventSink events,
     this.asyncPool = asyncPool;
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.AgentRuntime}
 
 \begin{notebox}
 \lstinline{EventSink.noop()} lets unit tests instantiate
@@ -117,6 +130,12 @@ outermost wiring layer.
 \section{Testability and Observability}
 \label{sec:testability-observability}
 
+\begin{learningbox}
+After this section you will be able to explain the six design
+principles and identify the interface or type that enforces each
+one.
+\end{learningbox}
+
 Six principles shape every interface in this framework.
 Table~\ref{tbl:six-principles} lists them with the contract that
 enforces each one.
@@ -125,7 +144,7 @@ enforces each one.
 \centering
 \caption{Six design principles and their interface anchors}
 \label{tbl:six-principles}
-\begin{tabularx}{\textwidth}{lXl}
+\begin{tabularx}{\textwidth}{p{3.0cm} X p{4.6cm}}
 \toprule
 \textbf{Principle} & \textbf{Rationale} &
   \textbf{Interface / type} \\
@@ -154,16 +173,22 @@ Tenant-safe &
 \end{tabularx}
 \end{table}
 
-\begin{learningbox}
+\begin{notebox}
 Because \lstinline{Reasoning}, \lstinline{Action},
 \lstinline{Memory}, and \lstinline{Perception} are
 single-method interfaces, any test can substitute a lambda
 and never touch a network socket.
-\end{learningbox}
+\end{notebox}
 
 %% ------------------------------------------------------------
 \section{Java Concurrency Models}
 \label{sec:concurrency-models}
+
+\begin{learningbox}
+After this section you will be able to describe the synchronous
+and async execution paths and explain why the runtime never owns
+scheduling policy.
+\end{learningbox}
 
 \lstinline{AgentRuntime} exposes both a synchronous path and a
 \lstinline{CompletableFuture}-based async path
@@ -187,6 +212,7 @@ public CompletableFuture<ExecutionResult> executeAsync(
         () -> execute(agent, task, tenantId, userId), asyncPool);
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.AgentRuntime}
 
 The runtime never decides scheduling policy --- it only
 \emph{respects} the pool it receives.  Inject a bounded,
@@ -203,12 +229,20 @@ pool per tenant.
 \section{Interface Catalogue as an Architecture Decision}
 \label{sec:interface-catalogue}
 
+\begin{learningbox}
+After this section you will be able to draw the interface
+dependency map from memory and state what coupling each interface
+prevents.
+\end{learningbox}
+
 Every behavioural decision in the framework is expressed as a
 one-method interface.  The four leaf interfaces composited by
-\lstinline{Agent.Builder} are the proof.
+\lstinline{Agent.Builder}\marginpar{\footnotesize Vol.~1, Ch.~2}
+are the proof.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   node distance=1.6cm and 2.4cm,
   every node/.style={font=\small\sffamily},
@@ -232,7 +266,8 @@ one-method interface.  The four leaf interfaces composited by
   \draw[arr] (reas)  -- node[above]{\tiny decide(ctx,obs)} (ec);
   \draw[arr] (act)   -- node[below,sloped]{\tiny execute(dec,ctx)} (ec);
   \draw[arr] (ec)    -- node[above]{\tiny checkpoint()} (sn);
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \caption{Fig~1.1 --- Interface dependency map.
   \texttt{Agent.Builder} composes four leaf contracts;
   \texttt{ExecutionContext} is the shared mutable spine.}
@@ -244,7 +279,7 @@ one-method interface.  The four leaf interfaces composited by
 
 \lstinline{Agent} (Listing~\ref{lst:agent}) is a pure value
 object.  It holds \emph{no mutable state}; all state lives in
-\lstinline{ExecutionContext}.
+\lstinline{ExecutionContext}\marginpar{\footnotesize Vol.~1, Ch.~4}.
 
 \begin{lstlisting}[
   language=Java,
@@ -274,6 +309,7 @@ public final class Agent {
     }
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.Agent}
 
 \subsection{Reasoning and Action}
 \label{subsec:reasoning-action}
@@ -294,12 +330,13 @@ public interface Action {
     ActionResult execute(Decision decision, ExecutionContext ctx);
 }
 \end{lstlisting}
+\githubref{com.agentframework.foundation.Reasoning · com.agentframework.action.Action}
 
-\begin{learningbox}
+\begin{notebox}
 Both interfaces are lambda-compatible (single abstract method).
 In tests: \lstinline{Reasoning stub = (ctx, obs) -> Decision.finalAnswer("ok");}
 --- no mocking framework required.
-\end{learningbox}
+\end{notebox}
 
 \subsection{The \texttt{RunState} Machine}
 \label{subsec:runstate}
@@ -323,9 +360,11 @@ public enum RunState {
     public boolean isLive() { return !isTerminal(); }
 }
 \end{lstlisting}
+\githubref{com.agentframework.foundation.RunState}
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   node distance=1.0cm and 1.8cm,
   every node/.style={font=\tiny\sffamily},
@@ -361,10 +400,11 @@ public enum RunState {
              node[below]{\tiny resume} (plan);
   \draw[arr] (plan) edge[bend right=10] (abrt);
   \draw[arr] (val)  -- node[right]{\tiny limit} (term);
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \caption{Fig~1.2 --- State machine.  Terminal states (red border)
   have no outgoing edges.  \texttt{DEGRADED} always transitions
-  to \texttt{ABORTED} (C4 spec fix).}
+  to \texttt{ABORTED} (C4 spec fix, Vol.~1, Ch.~8).}
 \label{fig:state-machine}
 \end{figure}
 
@@ -394,6 +434,7 @@ interface Snapshot {
     String                   integrityHash();
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.ExecutionContext}
 
 \begin{notebox}
 \lstinline{schemaVersion} lets the framework evolve the snapshot
@@ -405,6 +446,13 @@ the integrity check runs.
 %% ------------------------------------------------------------
 \section{Policy, Secrets, and Events}
 \label{sec:policy-secrets-events}
+
+\begin{learningbox}
+After this section you will be able to trace how
+\lstinline{TenantPolicy} enforces tool allowlists and how
+\lstinline{AgentEvent.EventType} provides the single observable
+vocabulary for the entire framework.
+\end{learningbox}
 
 \subsection{Tenant Policy Engine}
 \label{subsec:tenant-policy}
@@ -435,6 +483,7 @@ public record TenantPolicy(
     }
 }
 \end{lstlisting}
+\githubref{com.agentframework.security.TenantPolicy}
 
 \begin{lstlisting}[
   language=Java,
@@ -463,6 +512,7 @@ public ValidationVerdict check(
     };
 }
 \end{lstlisting}
+\githubref{com.agentframework.security.TenantPolicyEngine}
 
 \subsection{Event Taxonomy}
 \label{subsec:event-taxonomy}
@@ -492,17 +542,24 @@ public record AgentEvent(
     }
 }
 \end{lstlisting}
+\githubref{com.agentframework.observability.AgentEvent}
 
-\begin{learningbox}
+\begin{notebox}
 All observability (Part~3) and security (Part~4) chapters
 subscribe to \lstinline{AgentEvent.EventType} --- never to
 free-form log strings.  Adding a new observable behaviour means
 adding one enum constant and one \lstinline{emit()} call.
-\end{learningbox}
+\end{notebox}
 
 %% ------------------------------------------------------------
 \section{A Run from First Call to Final State}
 \label{sec:run-walkthrough}
+
+\begin{learningbox}
+After this section you will be able to trace a single run
+through every state transition from \lstinline{INITIALIZED} to a
+terminal state using only the interface contracts defined above.
+\end{learningbox}
 
 With all contracts in place, the run loop is a straightforward
 orchestration.  Listing~\ref{lst:smr-planning} shows the
@@ -554,28 +611,20 @@ case PLANNING -> {
     }
 }
 \end{lstlisting}
+\githubref{com.agentframework.core.StateMachineRunner}
 
 \begin{notebox}
 \lstinline{DEGRADED} always transitions to \lstinline{ABORTED},
-never to \lstinline{TERMINATED} (C4 spec fix, Vol.~1 Ch.~8).
+never to \lstinline{TERMINATED} (C4 spec fix, Vol.~1, Ch.~8).
 \end{notebox}
 
 \begin{takeawaybox}{Chapter 1 Takeaways}
-\begin{itemize}
-  \item Define interfaces before implementations --- every failure
-        mode maps to a missing method signature.
-  \item \lstinline{Agent} is stateless; all mutable state lives
-        in \lstinline{ExecutionContext}.
-  \item Thread pools are injected, never static --- full
-        tenant-isolation story for async runs.
-  \item Every checkpoint is integrity-hashed over all liveness
-        counters; replay rejects tampered snapshots.
-  \item Four one-method interfaces make every behaviour
-        unit-testable with a lambda.
-  \item \lstinline{TenantPolicy} is immutable and factory-built;
-        \lstinline{TenantPolicyEngine.check()} uses an exhaustive
-        sealed-class switch.
-  \item \lstinline{AgentEvent.EventType} is the single vocabulary
-        for all observability, alerting, and audit logging.
-\end{itemize}
+Every failure mode in production agent systems maps to a missing
+interface contract: bounded execution, deterministic replay,
+tenant isolation, observability, and suspension are all encoded in
+constructor signatures, not left to convention.
+Four single-method interfaces---\lstinline{Reasoning},
+\lstinline{Action}, \lstinline{Memory}, \lstinline{Perception}---make
+every behaviour unit-testable with a lambda and eliminate the
+need for a live model or infrastructure in any unit test.
 \end{takeawaybox}
