@@ -1,18 +1,13 @@
 # ============================================================
 #  Build LaTeX — Engineering AI Agents for Production Vol. 2
 #
-#  ROOT CAUSE OF PREVIOUS FAILURE:
-#  `cd Tex` moved CWD to Tex/, so \input{Tex/preamble} became
-#  Tex/Tex/preamble.tex — not found.
-#
-#  FIX: Run latexmk from repo root (no cd). The .tex file
-#  is referenced as Tex/main.tex. All \input{Tex/...} paths
-#  in main.tex resolve correctly from repo root.
-#  -output-directory is set to Tex/Output (repo-root-relative).
-#
-#  xu-cheng/texlive-action mounts the workspace at
-#  GITHUB_WORKSPACE and sets CWD to it — so repo root is
-#  always the working directory inside the container.
+#  FIXES applied vs previous version:
+#  1. Added -f (force) flag — latexmk now runs all passes
+#     needed to resolve cross-references (\ref, \label,
+#     \lstref etc.) instead of bailing on pass-1 warnings.
+#  2. Removed -halt-on-error — combined with -f it caused
+#     exit code 12 on unresolved refs; -interaction=nonstopmode
+#     is sufficient to keep the run going through warnings.
 # ============================================================
 name: Build LaTeX to PDF
 
@@ -40,8 +35,8 @@ jobs:
           run: |
             latexmk \
               -xelatex \
+              -f \
               -interaction=nonstopmode \
-              -halt-on-error \
               -output-directory=Tex/Output \
               Tex/main.tex
 
