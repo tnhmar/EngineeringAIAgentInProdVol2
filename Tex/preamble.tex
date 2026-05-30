@@ -143,6 +143,10 @@
 \usepackage{longtable}
 \renewcommand{\arraystretch}{1.35}
 
+%% Ragged-right paragraph column type: no underfull hbox warnings in
+%% narrow p{} columns.  Requires ragged2e (loaded below).
+\newcolumntype{P}[1]{>{\RaggedRight\arraybackslash}p{#1}}
+
 \usepackage{graphicx}
 \usepackage{float}
 \usepackage{caption}
@@ -246,6 +250,15 @@
   \begin{quote}\itshape#1\end{quote}
   \begin{flushright}--- #2\end{flushright}
   \vspace{1em}
+}
+
+%% \githubref{fully.qualified.ClassName} — renders a "Full source:" callout
+%% after code listings, pointing readers to the companion repository.
+\newcommand{\githubref}[1]{%
+  \vspace{2pt}%
+  {\small\sffamily\color{BookMid}%
+   Full source: \texttt{#1}}%
+  \vspace{4pt}%
 }
 
 \usepackage{tcolorbox}

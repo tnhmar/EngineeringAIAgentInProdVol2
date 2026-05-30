@@ -53,30 +53,40 @@ Terminal states (\lstinline{COMPLETED}, \lstinline{ABORTED},
 \lstinline{isLive()} guard at the top of the run loop
 detects them in O(1) and exits cleanly.
 
+%% State-transition table.
+%% Column sizing rationale:
+%%   Col 1 (From) and Col 2 (To): P{2.4cm} — widest state name is
+%%     TOOL_EXECUTION (14 chars in \small\textsc) ≈ 2.2 cm at 10pt.
+%%   Col 3 (Trigger): X — stretches to absorb slack.
+%%   Col 4 (Event emitted): P{3.9cm} — widest token is
+%%     DELEGATION_DEPTH_EXCEEDED in \small\lstinline ≈ 3.7 cm.
+%%   \small applied to entire table so inline-code tokens fit.
+%%   P{} uses RaggedRight (defined in preamble) — no underfull warnings.
 \begin{table}[htbp]
 \centering
 \caption{State transition table --- \texttt{StateMachineRunner} (Table~2.1)}
 \label{tbl:state-transitions}
-\begin{tabularx}{\textwidth}{p{2.5cm} p{2.5cm} X p{4.0cm}}
+\small
+\begin{tabularx}{\textwidth}{P{2.4cm} P{2.4cm} X P{3.9cm}}
 \toprule
 \textbf{From} & \textbf{To} & \textbf{Trigger} & \textbf{Event emitted} \\
 \midrule
-\textsc{initialized}   & \textsc{validating}      & Root goal pushed to goal stack                            & ---                                        \\
-\textsc{initialized}   & \textsc{terminated}      & Delegation depth exceeds limit                            & \lstinline{DELEGATION\_DEPTH\_EXCEEDED}    \\
-\textsc{validating}    & \textsc{planning}        & All resource limits pass                                  & ---                                        \\
-\textsc{validating}    & \textsc{terminated}      & Cycle, token, wall-clock, or budget limit hit             & \lstinline{RESOURCE\_LIMIT\_HIT}           \\
-\textsc{planning}      & \textsc{model\_call}    & Perception complete; reasoning begins                     & ---                                        \\
-\textsc{model\_call}   & \textsc{planning}        & Decision returned by reasoning                            & ---                                        \\
-\textsc{planning}      & \textsc{tool\_exec.}   & Validation passed                                         & ---                                        \\
-\textsc{tool\_exec.}  & \textsc{memory\_upd.}  & Action completed                                          & ---                                        \\
-\textsc{memory\_upd.} & \textsc{validating}      & Review complete, run still live                           & \lstinline{CYCLE\_COMPLETED}               \\
-\textsc{planning}      & \textsc{validating}      & Validation needs correction (budget not exceeded)         & \lstinline{PLAN\_STALE}                    \\
-\textsc{planning}      & \textsc{terminated}      & Validation failed or revision budget exhausted            & \lstinline{PLAN\_STALE}                    \\
-\textsc{planning}      & \textsc{terminated}      & Stuck state detected                                      & \lstinline{STUCK\_STATE\_DETECTED}         \\
-\textsc{planning}      & \textsc{terminated}      & Goal stagnation detected                                  & \lstinline{GOAL\_STAGNATION\_DETECTED}     \\
-\textsc{planning}      & \textsc{completed}       & Root goal achieved or FinalAnswer                         & ---                                        \\
-\textsc{planning}      & \textsc{susp.\_hitl}   & Escalation requested                                      & \lstinline{HITL\_REQUESTED}                \\
-\textsc{degraded}      & \textsc{aborted}         & C4 fix: degraded runs must be explicitly aborted          & \lstinline{RUN\_ABORTED}                   \\
+\textsc{initialized}   & \textsc{validating}       & Root goal pushed to goal stack                               & ---                                             \\
+\textsc{initialized}   & \textsc{terminated}       & Delegation depth exceeds limit                               & \lstinline{DELEGATION_DEPTH_EXCEEDED}           \\
+\textsc{validating}    & \textsc{planning}         & All resource limits pass                                     & ---                                             \\
+\textsc{validating}    & \textsc{terminated}       & Cycle, token, wall-clock, or budget limit hit                & \lstinline{RESOURCE_LIMIT_HIT}                  \\
+\textsc{planning}      & \textsc{model\_call}     & Perception complete; reasoning begins                        & ---                                             \\
+\textsc{model\_call}   & \textsc{planning}         & Decision returned by reasoning                               & ---                                             \\
+\textsc{planning}      & \textsc{tool\_execution} & Validation passed                                            & ---                                             \\
+\textsc{tool\_execution} & \textsc{memory\_update} & Action completed                                             & ---                                             \\
+\textsc{memory\_update} & \textsc{validating}      & Review complete, run still live                              & \lstinline{CYCLE_COMPLETED}                     \\
+\textsc{planning}      & \textsc{validating}       & Validation needs correction (revision budget not exceeded)   & \lstinline{PLAN_STALE}                          \\
+\textsc{planning}      & \textsc{terminated}       & Validation failed or revision budget exhausted               & \lstinline{PLAN_STALE}                          \\
+\textsc{planning}      & \textsc{terminated}       & Stuck state detected                                         & \lstinline{STUCK_STATE_DETECTED}                \\
+\textsc{planning}      & \textsc{terminated}       & Goal stagnation detected                                     & \lstinline{GOAL_STAGNATION_DETECTED}            \\
+\textsc{planning}      & \textsc{completed}        & Root goal achieved or FinalAnswer                            & ---                                             \\
+\textsc{planning}      & \textsc{suspended\_hitl} & Escalation requested                                         & \lstinline{HITL_REQUESTED}                      \\
+\textsc{degraded}      & \textsc{aborted}          & C4 fix: degraded runs must be explicitly aborted             & \lstinline{RUN_ABORTED}                         \\
 \bottomrule
 \end{tabularx}
 \end{table}
