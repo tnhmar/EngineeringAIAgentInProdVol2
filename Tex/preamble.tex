@@ -279,10 +279,10 @@
   left=8pt, right=8pt, top=6pt, bottom=6pt,
   boxrule=0.6pt, width=\linewidth
 }
-\newtcolorbox{takeawaybox}{
+\newtcolorbox{takeawaybox}[1]{
   colback=TakeawayBg, colframe=TakeawayBorder,
   before skip=12pt, fonttitle=\sffamily\bfseries\small,
-  title={Key Takeaway}, breakable, lines before break=3,
+  title={#1}, breakable, lines before break=3,
   left=8pt, right=8pt, top=6pt, bottom=6pt,
   boxrule=0.6pt, width=\linewidth
 }
@@ -311,7 +311,10 @@
 }
 
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta}
+%% positioning: enables `right=of X`, `below=of X` node placement syntax
+%% shapes.geometric + shapes.misc: rounded-rect, diamond, etc. for diagrams
+%% calc: coordinate arithmetic (e.g. $(A)!0.5!(B)$)
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, shapes.misc, calc}
 \usepackage{pdflscape}
 \usepackage{ragged2e}
 
