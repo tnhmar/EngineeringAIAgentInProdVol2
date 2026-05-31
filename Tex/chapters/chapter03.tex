@@ -65,7 +65,7 @@ It exposes only the operations the runtime needs: put a keyed value, get by key,
 and take an immutable snapshot for context assembly.
 
 \begin{lstlisting}[language=Java,caption={Working-memory scratchpad — \texttt{memory/working/WorkingMemoryStore.java}},label={lst:working-memory}]
-// Source: memory/working/WorkingMemoryStore.java
+% Source: memory/working/WorkingMemoryStore.java
 public class WorkingMemoryStore {
 
     private volatile ConcurrentHashMap<String, Object> store = new ConcurrentHashMap<>();
@@ -126,7 +126,7 @@ It maintains a concurrent map of \texttt{ToolDefinition} entries keyed by tool
 identifier, and exposes register, find, list-by-category, and deregister operations.
 
 \begin{lstlisting}[language=Java,caption={\texttt{ToolRegistry} — \texttt{tooling/registry/ToolRegistry.java}},label={lst:tool-registry}]
-// Source: tooling/registry/ToolRegistry.java
+% Source: tooling/registry/ToolRegistry.java
 public class ToolRegistry {
     private final Map<String, ToolDefinition> tools = new ConcurrentHashMap<>();
 
@@ -207,13 +207,54 @@ It is a set of composable stages:
         pipeline execution into the framework's typed failure hierarchy.
 \end{enumerate}
 
+% ------------------------------------------------------------------
+% Figure 3.1 — Orchestration pipeline stages
+% ------------------------------------------------------------------
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=4pt, minimum width=3.2cm,
+              minimum height=0.75cm, text centered, font=\small\ttfamily,
+              fill=teal!12},
+  arr/.style={->, >=stealth, thick},
+  lbl/.style={font=\fontsize{7}{8}\selectfont\itshape, midway, above}
+]
+  \node[box] (per) at (0,    0) {Perception};
+  \node[box] (rea) at (3.8,  0) {Reasoning};
+  \node[box] (act) at (7.6,  0) {Action};
+  \node[box] (ref) at (7.6, -1.6) {Reflection};
+  \node[box] (ter) at (3.8, -1.6) {Termination};
+  \node[box] (fai) at (0,   -1.6) {Failure\\Detection};
+
+  \draw[arr] (per) -- node[lbl]{percept}   (rea);
+  \draw[arr] (rea) -- node[lbl]{reasoning} (act);
+  \draw[arr] (act) -- (ref);
+  \draw[arr] (ref) -- (ter);
+  \draw[arr] (ter) -- node[lbl, below]{exception} (fai);
+
+  % loop-back: terminate or re-perceive
+  \draw[arr, dashed] (ter.west) to[bend right=15]
+    node[font=\fontsize{6}{7}\selectfont, left]{next step} (per.west);
+  \draw[arr, dashed] (ter.north) to[bend left=25]
+    node[font=\fontsize{6}{7}\selectfont, above]{terminate} ++(0, 1.1)
+    node[draw, rounded corners=2pt, font=\fontsize{7}{8}\selectfont\ttfamily,
+         fill=gray!20] {NextAction\.terminate()};
+\end{tikzpicture}
+\caption{The six-stage orchestration pipeline inside
+  \texttt{DefaultAgentOrchestrator}. Each stage is a distinct package under
+  \texttt{orchestrator/}. Failure detection is a cross-cutting concern that
+  intercepts exceptions from any stage and classifies them into the framework's
+  typed failure hierarchy.}
+\label{fig:orchestration-pipeline}
+\end{figure}
+
 The decision dispatch section of
 \texttt{DefaultAgentOrchestrator}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/DefaultAgentOrchestrator.java}}
 routes the current \texttt{AgentTask} through the pipeline stages in sequence.
 The excerpt below shows the pipeline invocation structure:
 
 \begin{lstlisting}[language=Java,caption={Pipeline invocation in \texttt{orchestrator/DefaultAgentOrchestrator.java}},label={lst:pipeline}]
-// Source: orchestrator/DefaultAgentOrchestrator.java
+% Source: orchestrator/DefaultAgentOrchestrator.java
 private NextAction runPipeline(Run run, AgentTask task) {
     var percept   = perception.perceive(run, task);
     var reasoning = reasoner.reason(percept);
@@ -244,4 +285,6 @@ private NextAction runPipeline(Run run, AgentTask task) {
   they do not call back into the runtime loop.
   Chapter~4 adds the protocol edge — the adapters that make the runtime
   reachable from the outside world.
+  Figure~\ref{fig:orchestration-pipeline} shows how the six pipeline stages
+  compose inside \texttt{DefaultAgentOrchestrator}.
 \end{takeawaybox}
