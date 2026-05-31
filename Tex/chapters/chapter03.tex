@@ -60,13 +60,37 @@ construction time through the builder.
 This is the inward-dependency invariant applied to memory: the runtime core
 never imports a Redis type, a JDBC driver class, or a vector store SDK.
 
-For working memory, the framework maintains a run-scoped record of conversation
-turns and intermediate results.
-The interface exposes only two operations: load the current window for a given run,
-and append a new record.
-The window selection logic — which records to include, how many tokens they
-consume, and when old records are retired — is the responsibility of
-\texttt{MemoryPolicy}, not of the interface or the backend.
+For working memory, the framework provides
+\texttt{WorkingMemoryStore}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/working/WorkingMemoryStore.java}}
+— a bounded, run-scoped scratchpad that lives in-process for the duration of a
+single run.
+It exposes only the operations the runtime needs: put a keyed value, get by key,
+and take an immutable snapshot for context assembly.
+
+\begin{lstlisting}[language=Java,caption={Working-memory scratchpad — \texttt{memory/working/WorkingMemoryStore.java}},label={lst:working-memory}]
+// Source: memory/working/WorkingMemoryStore.java
+public class WorkingMemoryStore {
+
+    private volatile ConcurrentHashMap<String, Object> store = new ConcurrentHashMap<>();
+
+    public void put(String key, Object value) {
+        Objects.requireNonNull(key, "key must not be null");
+        store.put(key, value);
+    }
+
+    public Optional<Object> get(String key) {
+        return Optional.ofNullable(store.get(key));
+    }
+
+    public void remove(String key) { store.remove(key); }
+
+    /** Atomically replaces the entire map — safe under concurrent writes. */
+    public void clear() { store = new ConcurrentHashMap<>(); }
+
+    public Map<String, Object> snapshot() { return Collections.unmodifiableMap(store); }
+    public int size() { return store.size(); }
+}
+\end{lstlisting}
 
 For durable memory tiers the framework differentiates between tiers at the type level
 through distinct interfaces and package structures under
@@ -99,12 +123,38 @@ of them.
 Tool execution happens only when the model selects a tool and the security policy
 permits the call.
 
-The \texttt{ToolRegistry} interface and the \texttt{Tool} interface live in
-\texttt{tooling/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/}}.
-The interface declares only two operations: list the available tools (returning their
-descriptors), and resolve a tool by name (returning the callable).
-The implementation details — static registration, dynamic discovery, MCP delegation
-— live behind the interface.
+The \texttt{ToolRegistry} class lives in
+\texttt{tooling/registry/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/registry/ToolRegistry.java}}.
+It maintains a concurrent map of \texttt{ToolDefinition} entries keyed by tool
+identifier, and exposes register, find, list-by-category, and deregister operations.
+
+\begin{lstlisting}[language=Java,caption={\texttt{ToolRegistry} — \texttt{tooling/registry/ToolRegistry.java}},label={lst:tool-registry}]
+// Source: tooling/registry/ToolRegistry.java
+public class ToolRegistry {
+    private final Map<String, ToolDefinition> tools = new ConcurrentHashMap<>();
+
+    public void register(ToolDefinition tool)    { tools.put(tool.toolId(), tool); }
+    public Optional<ToolDefinition> find(String toolId) {
+        return Optional.ofNullable(tools.get(toolId));
+    }
+    public List<ToolDefinition> byCategory(ToolCategory category) {
+        return tools.values().stream()
+                    .filter(t -> t.category() == category).toList();
+    }
+    public List<ToolDefinition> all()            { return List.copyOf(tools.values()); }
+    public void deregister(String toolId)        { tools.remove(toolId); }
+
+    /** Factory: returns an empty registry (no tools registered). */
+    public static ToolRegistry empty()           { return new ToolRegistry(); }
+}
+\end{lstlisting}
+
+The architectural point the listing encodes: \texttt{ToolRegistry} holds
+\texttt{ToolDefinition} descriptors, not callables.
+The orchestrator queries \texttt{all()} to build the tool list it sends to the
+model; the model selects a tool by \texttt{toolId}; the orchestrator calls
+\texttt{find(toolId)} and then dispatches execution separately.
+Discovery and execution are two distinct operations on two distinct types.
 
 \subsection{Parallel Tool Execution}
 \label{subsec:parallel-tools}
@@ -124,7 +174,7 @@ framework.
 An MCP tool adapter implements the \texttt{Tool} interface but delegates execution
 to a remote MCP server over the protocol wire.
 From the \texttt{ToolRegistry}'s perspective there is no distinction: every entry
-in the registry is a \texttt{Tool}, regardless of where the execution happens.
+in the registry is a \texttt{ToolDefinition}, regardless of where the execution happens.
 The adapter wires the transport; the registry and the orchestrator use the same
 interface in either case.
 The adapter lives in

@@ -282,18 +282,36 @@ translates between the framework's vocabulary and the provider's API in the
 adapter layer.
 
 The \texttt{ModelClient} interface lives in
-\texttt{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/}}.
-The interface declares only the method signatures: the caller passes a prompt in
-the framework's vocabulary and receives a response in the framework's vocabulary.
+\texttt{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/ModelClient.java}}.
+The interface declares a single method: the caller passes a \texttt{ModelPrompt}
+and a \texttt{ModelRequestContext} in the framework's vocabulary and receives a
+\texttt{ModelOutput} in the framework's vocabulary.
 Every provider detail lives behind the implementation.
 
-The test double (fake model client) is architecturally as important as the real
-implementation.
-A \texttt{FakeModelClient} that returns a fixed or scripted response sequence allows
-the full run loop to be exercised in a test that runs in under 100 milliseconds
-with no network access.
-The fake model client is not a test convenience — it is evidence that the model
-client boundary is genuinely narrow.
+\begin{lstlisting}[language=Java,caption={\texttt{ModelClient} interface — \texttt{modelclient/ModelClient.java}},label={lst:model-client}]
+// Source: modelclient/ModelClient.java
+public interface ModelClient {
+    /**
+     * Generate a model response for the given prompt.
+     *
+     * @param prompt   the assembled prompt package
+     * @param context  execution context (session id, tenant, working memory)
+     * @return model output (text + optional tool calls)
+     * @throws ModelClientException on HTTP or parse failure
+     *         (retryable flag indicates whether retry is safe)
+     */
+    ModelOutput generate(ModelPrompt prompt, ModelRequestContext context)
+        throws ModelClientException;
+}
+\end{lstlisting}
+
+The test double is architecturally as important as the real implementation.
+The framework ships a \texttt{StubModelClient}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/StubModelClient.java}}
+that returns a fixed or scripted response sequence — a tool call on the first
+invocation, then a direct answer — allowing the full run loop to be exercised
+in a test that runs in under 100 milliseconds with no network access.
+The stub is not a test convenience; it is evidence that the \texttt{ModelClient}
+boundary is genuinely narrow: a single-method interface has a single-method fake.
 
 \begin{tipbox}
   Write the fake before you write the real implementation.
