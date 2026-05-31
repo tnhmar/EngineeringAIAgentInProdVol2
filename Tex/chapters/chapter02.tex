@@ -1,650 +1,312 @@
-%% ============================================================
-%%  CHAPTER 2 — Architecting the Core Runtime
-%%  Status: DONE — reviewed, all fixes applied.
-%%  \chapter{} + \label{} declared in main.tex.
-%%  All listings extracted from
-%%  github.com/tnhmar/production-agent-framework- @ 50be372
-%% ============================================================
+% =============================================================
+% Chapter 02 — Architecting the Core Runtime
+% Rewritten per Part 1 Deep Edit Report
+% =============================================================
 
-\chapterquote{A loop that cannot be interrupted is not a loop---it
-is a trap.}{---}
+\chapter{Architecting the Core Runtime}
+\label{ch:core-runtime}
 
-%% ------------------------------------------------------------
-\section{From Interfaces to Motion}
-\label{sec:ch2-intro}
+% ------------------------------------------------------------------
+% Chapter Opening
+% ------------------------------------------------------------------
 
-\begin{learningbox}
-After this section you will understand why \lstinline{StateMachineRunner}
-is the sole orchestrator of the \lstinline{RunState} machine and
-how it delegates every substantive decision to its injected
-collaborators.
-\end{learningbox}
+Chapter~1 established the contracts: the interface catalogue, the state vocabulary,
+and the six design invariants.
+This chapter traces the decisions that shaped each component in the framework:
+why the \texttt{Run} aggregate is the only mutable root, why the loop is sequential,
+why interrupts are cooperative rather than forced, and why the model client is a
+thin boundary rather than a provider wrapper.
+The framework repository is the implementation reference throughout.
 
-Chapter~1 established the \emph{interfaces} that govern every
-behavioural decision: \lstinline{Reasoning}, \lstinline{Action},
-\lstinline{Memory}, \lstinline{Perception}, and the
-\lstinline{ExecutionContext} that binds them.  This chapter
-describes \emph{how those interfaces are put in motion}.
+Section~\ref{sec:state-machine} covers the \texttt{Run} aggregate and the state
+machine loop.
+Section~\ref{sec:executor-service} covers scheduling and admission control.
+Section~\ref{sec:interrupts} covers cooperative pause, resume, timeout, and
+cancellation.
+Section~\ref{sec:model-client} covers the provider-neutral model client boundary.
 
-The answer is \lstinline{StateMachineRunner} --- a
-270-line class with a single public method,
-\lstinline{run(Agent, ExecutionContext)}.  It owns no domain logic
-of its own; it only drives the \lstinline{RunState} machine and
-delegates every substantive decision to the injected collaborators.
-Understanding its internal structure is the prerequisite for every
-production concern addressed in later chapters: liveness detection,
-HITL suspension, deterministic replay, and multi-tenant isolation.
+% ------------------------------------------------------------------
+\section{The State Machine}
+\label{sec:state-machine}
+% ------------------------------------------------------------------
 
-%% ------------------------------------------------------------
-\section{The State Transition Table}
-\label{sec:state-transition-table}
+\subsection{The Run Aggregate}
+\label{subsec:run-aggregate}
 
-\begin{learningbox}
-After this section you will be able to enumerate every legal
-\lstinline{RunState} transition, its trigger, and the event it
-emits --- and explain the C4 spec fix that routes
-\lstinline{DEGRADED} to \lstinline{ABORTED}.
-\end{learningbox}
+The \texttt{Run} class is the only mutable aggregate root in the framework.
+Every other piece of state — step history, memory records, tool results — is either
+immutable or belongs to a separate repository.
+This is a deliberate constraint.
+If step history were part of the aggregate, every repository load would inflate
+the object proportionally to the run's age.
+Separating step history into \texttt{RunRepository} keeps the hot path fast and the
+aggregate boundary stable: the runtime loads a compact \texttt{Run} object, transitions
+it through one state, writes one \texttt{RunStep} record, and moves on.
 
-Table~\ref{tbl:state-transitions} enumerates every legal
-transition, its trigger, and the event emitted.
-Terminal states (\lstinline{COMPLETED}, \lstinline{ABORTED},
-\lstinline{TERMINATED}) have no outgoing edges; the
-\lstinline{isLive()} guard at the top of the run loop
-detects them in O(1) and exits cleanly.
+The architectural principle encoded in \texttt{Run} is guarded state mutation:
+no state transition may happen without passing through a validation guard that
+rejects illegal transitions at the point of call.
+The listing below shows only the \texttt{transition()} method, which is the entire
+enforcement point:
 
-%% State-transition table.
-%% Column sizing rationale:
-%%   Col 1 (From) and Col 2 (To): P{2.4cm} — widest state name is
-%%     TOOL_EXECUTION (14 chars in \small\textsc) ≈ 2.2 cm at 10pt.
-%%   Col 3 (Trigger): X — stretches to absorb slack.
-%%   Col 4 (Event emitted): P{3.9cm} — widest token is
-%%     DELEGATION_DEPTH_EXCEEDED in \small\lstinline ≈ 3.7 cm.
-%%   \small applied to entire table so inline-code tokens fit.
-%%   P{} uses RaggedRight (defined in preamble) — no underfull warnings.
-\begin{table}[htbp]
+\begin{lstlisting}[language=Java,caption={Guarded transition method — \texttt{runtime/run/Run.java}},label={lst:run-transition}]
+// Source: runtime/run/Run.java
+public void transition(RunState next) {
+    if (!isLegalTransition(state, next)) {
+        throw new IllegalStateException(
+            "Illegal transition: " + state + " -> " + next
+        );
+    }
+    this.state = next;
+    this.updatedAt = Instant.now();
+}
+
+private boolean isLegalTransition(RunState from, RunState to) {
+    Set<RunState> legal = buildLegalTransitions().get(from);
+    return legal != null && legal.contains(to);
+}
+\end{lstlisting}
+
+\subsection{Legal Transition Table}
+\label{subsec:legal-transitions}
+
+\begin{table}[h]
 \centering
-\caption{State transition table --- \texttt{StateMachineRunner} (Table~2.1)}
-\label{tbl:state-transitions}
-\small
-\begin{tabularx}{\textwidth}{P{2.4cm} P{2.4cm} X P{3.9cm}}
+\caption{Legal state transitions for a \texttt{Run}}
+\label{tab:legal-transitions}
+\begin{tabular}{ll}
 \toprule
-\textbf{From} & \textbf{To} & \textbf{Trigger} & \textbf{Event emitted} \\
+\textbf{From state} & \textbf{Legal next states} \\
 \midrule
-\textsc{initialized}   & \textsc{validating}       & Root goal pushed to goal stack                               & ---                                             \\
-\textsc{initialized}   & \textsc{terminated}       & Delegation depth exceeds limit                               & \lstinline{DELEGATION_DEPTH_EXCEEDED}           \\
-\textsc{validating}    & \textsc{planning}         & All resource limits pass                                     & ---                                             \\
-\textsc{validating}    & \textsc{terminated}       & Cycle, token, wall-clock, or budget limit hit                & \lstinline{RESOURCE_LIMIT_HIT}                  \\
-\textsc{planning}      & \textsc{model\_call}     & Perception complete; reasoning begins                        & ---                                             \\
-\textsc{model\_call}   & \textsc{planning}         & Decision returned by reasoning                               & ---                                             \\
-\textsc{planning}      & \textsc{tool\_execution} & Validation passed                                            & ---                                             \\
-\textsc{tool\_execution} & \textsc{memory\_update} & Action completed                                             & ---                                             \\
-\textsc{memory\_update} & \textsc{validating}      & Review complete, run still live                              & \lstinline{CYCLE_COMPLETED}                     \\
-\textsc{planning}      & \textsc{validating}       & Validation needs correction (revision budget not exceeded)   & \lstinline{PLAN_STALE}                          \\
-\textsc{planning}      & \textsc{terminated}       & Validation failed or revision budget exhausted               & \lstinline{PLAN_STALE}                          \\
-\textsc{planning}      & \textsc{terminated}       & Stuck state detected                                         & \lstinline{STUCK_STATE_DETECTED}                \\
-\textsc{planning}      & \textsc{terminated}       & Goal stagnation detected                                     & \lstinline{GOAL_STAGNATION_DETECTED}            \\
-\textsc{planning}      & \textsc{completed}        & Root goal achieved or FinalAnswer                            & ---                                             \\
-\textsc{planning}      & \textsc{suspended\_hitl} & Escalation requested                                         & \lstinline{HITL_REQUESTED}                      \\
-\textsc{degraded}      & \textsc{aborted}          & C4 fix: degraded runs must be explicitly aborted             & \lstinline{RUN_ABORTED}                         \\
+\texttt{QUEUED}          & \texttt{PLANNING}, \texttt{CANCELLED} \\
+\texttt{PLANNING}        & \texttt{MODEL\_CALL}, \texttt{PAUSED}, \texttt{FAILED}, \texttt{CANCELLED} \\
+\texttt{MODEL\_CALL}    & \texttt{PLANNING}, \texttt{TOOL\_EXECUTION}, \texttt{RESPONDING},
+                           \texttt{PAUSED}, \texttt{FAILED}, \texttt{TIMED\_OUT}, \texttt{CANCELLED} \\
+\texttt{TOOL\_EXECUTION}& \texttt{PLANNING}, \texttt{PAUSED}, \texttt{FAILED}, \texttt{CANCELLED} \\
+\texttt{MEMORY\_UPDATE} & \texttt{PLANNING}, \texttt{PAUSED}, \texttt{FAILED} \\
+\texttt{RESPONDING}      & \texttt{COMPLETED}, \texttt{FAILED} \\
+\texttt{PAUSED}          & \texttt{PLANNING}, \texttt{CANCELLED} \\
 \bottomrule
-\end{tabularx}
+\end{tabular}
 \end{table}
 
-\begin{notebox}
-The C4 specification (Vol.~1, Ch.~8) states: ``There is no
-transition from \lstinline{DEGRADED} directly to
-\lstinline{TERMINATED} --- a degraded run must either recover or be
-explicitly aborted.''  The \lstinline{DEGRADED} case in
-\lstinline{StateMachineRunner.step()} calls the dedicated
-\lstinline{abort()} helper, which sets \lstinline{ABORTED} rather
-than \lstinline{TERMINATED}.  This resolves the
-state/event contradiction where the state said
-\lstinline{TERMINATED} but the event said \lstinline{RUN\_ABORTED}.
-\end{notebox}
+The \texttt{MODEL\_CALL \to PLANNING} transition deserves explanation.
+When the model returns a response that requires further deliberation — a
+multi-step plan, a clarification request, or a tool result that changes the
+reasoning context — the orchestrator transitions back to \texttt{PLANNING}
+rather than directly to the next action.
+This preserves the invariant that \texttt{PLANNING} is always the state in which
+the agent assembles its context and decides on its next action.
+\texttt{PLANNING} therefore has a dual role: it is both the entry state after
+queuing and the state to which the loop returns after every model response that
+does not immediately resolve to a terminal action.
 
-%% ------------------------------------------------------------
-\section{The Run Loop}
-\label{sec:run-loop}
+\subsection{Step Record Types}
+\label{subsec:step-records}
 
-\begin{learningbox}
-After this section you will be able to explain why the outer
-\lstinline{while} loop contains no branching logic and how any
-collaborator stops the run by calling \lstinline{ctx.transitionTo()}
-rather than by throwing.
-\end{learningbox}
+Each step in a run produces two records: one written when the step begins and one
+written when it ends.
+The two-record pattern allows the repository to reconstruct the agent's position
+even if the process is killed between the start and end of a step: the in-progress
+record identifies that a step was begun but not completed.
 
-The outermost loop is intentionally minimal
-(Listing~\ref{lst:run-loop}).  Every early-exit, retry, and
-escalation decision lives \emph{inside} \lstinline{step()}, not
-here.  That discipline keeps the loop itself readable and the exit
-condition unambiguous.
+The framework uses a single \texttt{RunStep} record with a \texttt{state}
+discriminant field rather than a seven-type sealed hierarchy.
+A discriminated record is simpler to persist, query, and deserialise than a
+seven-type sealed hierarchy.
+The \texttt{state} field already identifies which step this is; a separate type
+hierarchy adds no information and creates a schema versioning problem every time
+a new state is added.
 
-\begin{lstlisting}[
-  language=Java,
-  caption={StateMachineRunner --- outer run loop
-           (\texttt{core/StateMachineRunner.java})},
-  label={lst:run-loop}]
-void run(Agent agent, ExecutionContext ctx) {
-    while (ctx.currentState().isLive()) {
-        step(agent, ctx);
-    }
-}
+\begin{lstlisting}[language=Java,caption={Unified step record — \texttt{runtime/run/RunStep.java}},label={lst:run-step}]
+// Source: runtime/run/RunStep.java
+public record RunStep(
+    String stepId,
+    String runId,
+    RunState state,
+    Instant startedAt,
+    Instant completedAt,
+    StepStatus status
+) {}
+\end{lstlisting}
 
-private void step(Agent agent, ExecutionContext ctx) {
-    switch (ctx.currentState()) {
-        case INITIALIZED -> { /* push root goal, transitionTo VALIDATING */ }
-        case VALIDATING  -> { /* check resource limits, transitionTo PLANNING */ }
-        case PLANNING    -> { /* perceive, decide, validate, execute, review */ }
-        case DEGRADED    -> abort(ctx, ...);  // C4 fix
-        default          -> {}
-    }
+\subsection{Step Execution and the Core Loop}
+\label{subsec:core-loop}
+
+Unexpected errors inside a step must be wrapped into a typed failure before the
+runtime acts on them.
+The framework classifies unchecked exceptions as \texttt{InternalFailure}, ensuring
+that even framework bugs produce a classifiable outcome rather than an uncaught
+exception that escapes the run boundary.
+
+Each state must map to exactly one executor.
+In the framework that mapping is maintained inside
+\texttt{DefaultAgentOrchestrator}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/DefaultAgentOrchestrator.java}},
+which owns the dispatch logic and validates state coverage at construction time.
+
+The core loop is a state-dispatch entry point: it reads the current \texttt{RunState},
+routes to the appropriate handler, and writes the resulting \texttt{RunStep} and
+\texttt{RunState} transition before yielding control back to the scheduler.
+The excerpt below shows the dispatch entry point only:
+
+\begin{lstlisting}[language=Java,caption={State-dispatch entry point — \texttt{orchestrator/DefaultAgentOrchestrator.java}},label={lst:dispatch}]
+// Source: orchestrator/DefaultAgentOrchestrator.java
+private ExecutionResult dispatch(Run run, AgentTask task) {
+    return switch (run.getState()) {
+        case PLANNING        -> planningHandler.handle(run, task);
+        case MODEL_CALL      -> modelCallHandler.handle(run, task);
+        case TOOL_EXECUTION  -> toolExecutionHandler.handle(run, task);
+        case MEMORY_UPDATE   -> memoryUpdateHandler.handle(run, task);
+        case RESPONDING      -> respondingHandler.handle(run, task);
+        default -> throw new InternalFailure(
+            "No handler for state: " + run.getState()
+        );
+    };
 }
 \end{lstlisting}
-\githubref{com.agentframework.core.StateMachineRunner}
-
-The \lstinline{isLive()} check on \lstinline{RunState} costs a
-single equality test against three constants --- no exception path,
-no flag polling.  Any collaborator that wants to stop the run calls
-\lstinline{ctx.transitionTo(RunState.TERMINATED)} or
-\lstinline{COMPLETED} or \lstinline{ABORTED}, and the outer loop
-exits cleanly on its next iteration.
-
-%% ------------------------------------------------------------
-\section{INITIALIZED and VALIDATING}
-\label{sec:init-validating}
-
-\begin{learningbox}
-After this section you will be able to describe the two jobs of
-the \lstinline{INITIALIZED} step and explain why resource limits
-are checked in \lstinline{VALIDATING} rather than inside
-\lstinline{PLANNING}.
-\end{learningbox}
-
-The \lstinline{INITIALIZED} step has two jobs: guard against
-delegation-depth abuse and push the root goal onto the goal stack
-(Listing~\ref{lst:init-step}).
-
-\begin{lstlisting}[
-  language=Java,
-  caption={INITIALIZED step --- delegation guard and root goal
-           (\texttt{core/StateMachineRunner.java})},
-  label={lst:init-step}]
-case INITIALIZED -> {
-    Task t = ctx.task();
-    int maxDepth = (t.maxChainDepth() > 0) ? t.maxChainDepth() : 10;
-    if (ctx.currentChainDepth() > maxDepth) {
-        terminate(ctx, new TerminationReason.ResourceLimit(
-            "Delegation depth " + ctx.currentChainDepth()
-            + " exceeds limit " + maxDepth),
-            AgentEvent.EventType.DELEGATION_DEPTH_EXCEEDED,
-            Map.of("depth", ctx.currentChainDepth(),
-                   "limit", maxDepth));
-        return;
-    }
-    ctx.goalStack().push(new Goal(
-        "root", null, GoalStatus.PENDING, t.instruction(),
-        List.of(), taskBudget));
-    ctx.transitionTo(RunState.VALIDATING);
-}
-\end{lstlisting}
-\githubref{com.agentframework.core.StateMachineRunner}
-
-\lstinline{VALIDATING} calls \lstinline{checkResourceLimits()}
-before every cycle.  Checking limits here --- rather than inside
-\lstinline{PLANNING} --- means the run can never start a new
-reasoning step after any limit fires.  The four limits are cycles,
-tokens, wall-clock time, and monetary budget.  All four are read
-from the \lstinline{Task} value object; none are hardcoded.
-
-%% ------------------------------------------------------------
-\section{The PLANNING Step in Full}
-\label{sec:planning-step}
-
-\begin{learningbox}
-After this section you will be able to trace the full PLANNING
-sequence from stale-plan injection through perception, decision,
-stuck-state check, and validation branch.
-\end{learningbox}
-
-The \lstinline{PLANNING} case is the heart of the runner.  Its
-sequence is: detect a stale plan; emit \lstinline{CYCLE\_STARTED};
-perceive; transition to \lstinline{MODEL\_CALL}; decide;
-transition back to \lstinline{PLANNING}; check for stuck state;
-validate; then branch on the validation outcome
-(Listing~\ref{lst:planning-step}).
-
-\begin{lstlisting}[
-  language=Java,
-  caption={PLANNING step --- perception, decision, and
-           validation branch
-           (\texttt{core/StateMachineRunner.java})},
-  label={lst:planning-step}]
-case PLANNING -> {
-    if (ctx.isPlanStale()) {
-        ctx.workingMemory().add(new WorkingMemoryEntry(
-            UUID.randomUUID().toString(),
-            "Plan correction required: " + ctx.stalenessHint(),
-            WorkingMemoryTier.ACTIVE, Origin.SYSTEM, 1.0,
-            Instant.now(), TaintLabel.CLEAN));
-        ctx.flagPlanStale(null);
-        emit(ctx, AgentEvent.EventType.PLAN_STALE, Map.of());
-    }
-    emit(ctx, AgentEvent.EventType.CYCLE_STARTED,
-        Map.of("cycle", ctx.cycleCount()));
-    Observations obs      = agent.perception().perceive(ctx);
-    ctx.transitionTo(RunState.MODEL_CALL);
-    Decision     decision = agent.reasoning().decide(ctx, obs);
-    ctx.transitionTo(RunState.PLANNING);
-    liveness.checkStuck(decision, ctx).ifPresent(reason ->
-        terminate(ctx, reason,
-            AgentEvent.EventType.STUCK_STATE_DETECTED, Map.of()));
-    if (!ctx.currentState().isLive()) return;
-    ValidationResult validation = validator.validate(decision, ctx);
-    switch (validation) {
-        case ValidationResult.Passed p      -> executeAndReview(...);
-        case ValidationResult.NeedsCorrection nc -> flagAndRetry(...);
-        case ValidationResult.Failed f      -> terminate(...);
-    }
-}
-\end{lstlisting}
-\githubref{com.agentframework.core.StateMachineRunner}
-
-\subsection{Liveness Checks Inside PLANNING}
-\label{subsec:liveness-inside-planning}
-
-Two liveness checks bracket the action call.  The first,
-\lstinline{checkStuck()}, fires \emph{before} execution: it
-detects identical decisions being repeated without progress.
-The second, \lstinline{checkStagnation()}, fires \emph{after}
-execution: it hashes the goal stack before and after the action
-and flags a run as stagnant if the hash is identical across
-configurable cycle thresholds.
-
-Both checks return \lstinline{Optional<TerminationReason>}.
-Using \lstinline{Optional} rather than throwing is deliberate: it
-keeps the control flow linear, avoids a catch block in the middle
-of the step case, and makes the calling code self-documenting.
-
-%% ------------------------------------------------------------
-\section{The Two-Phase Model}
-\label{sec:two-phase-model}
-
-\begin{learningbox}
-After this section you will be able to describe the execute-then-review
-split and explain why taint classification must run before the
-result is written to working memory.
-\end{learningbox}
-
-The name ``PLANNING'' is slightly misleading: the PLANNING
-state \emph{also} performs the action, then hands off to
-\lstinline{Review} for post-action processing.  This two-phase
-structure --- \emph{execute-then-review} --- is a deliberate design
-choice that keeps each concern in a single class.
-
-\begin{figure}[htbp]
-\centering
-\resizebox{\textwidth}{!}{%
-\begin{tikzpicture}[
-  node distance=0.9cm and 2.2cm,
-  every node/.style={font=\small\sffamily},
-  box/.style={draw=BookBlue,rounded corners=3pt,
-              fill=TipBg,minimum width=3.0cm,
-              minimum height=0.65cm,align=center},
-  side/.style={draw=NoteBorder,rounded corners=3pt,
-               fill=NoteBg,minimum width=2.8cm,
-               minimum height=0.65cm,align=center},
-  arr/.style={-{Stealth[length=5pt]},BookBlue,thick},
-  darr/.style={-{Stealth[length=5pt]},NoteBorder,dashed}
-]
-  \node[box] (plan)   {PLANNING};
-  \node[box, right=2.4cm of plan]  (exec) {execute(decision,ctx)};
-  \node[box, right=2.4cm of exec]  (rev)  {Review.step()};
-  \node[side, below=of plan] (val)  {validate(decision,ctx)};
-  \node[side, below=of rev]  (mem)  {workingMemory.add()};
-
-  \draw[arr]  (plan) -- node[above]{\small pass}  (exec);
-  \draw[arr]  (exec) -- node[above]{\small result} (rev);
-  \draw[darr] (plan) -- (val);
-  \draw[darr] (rev)  -- (mem);
-\end{tikzpicture}%
-}
-\caption{Fig~2.1 --- Two-phase model.  \texttt{StateMachineRunner}
-  owns the \emph{execute} phase; \texttt{Review} owns the
-  \emph{review} phase.  Both phases write to
-  \texttt{ExecutionContext}; neither knows about the other's
-  internal logic.}
-\label{fig:two-phase}
-\end{figure}
-
-\paragraph{Phase 1 --- Execute.}
-\lstinline{StateMachineRunner} calls
-\lstinline{agent.action().execute(decision, ctx)},
-transitions the state to \lstinline{TOOL\_EXECUTION} beforehand
-and \lstinline{MEMORY\_UPDATE} afterwards.  It has no knowledge of
-what the action does internally.
-
-\paragraph{Phase 2 --- Review.}
-\lstinline{Review.step()} receives the \lstinline{ActionResult} and
-performs six ordered operations: taint classification, context-window
-management, goal-stack update, belief-state update, long-term
-memory write-back, and termination checking.  It transitions the
-context to \lstinline{COMPLETED} or \lstinline{TERMINATED} when a
-termination condition is met, leaving the outer loop to exit
-on the next \lstinline{isLive()} check.
-
-\subsection{Why Taint Fires First}
-\label{subsec:taint-first}
-
-The taint classifier\marginpar{\footnotesize Vol.~1, Ch.~7} runs
-\emph{before} the result is written to working memory
-(Listing~\ref{lst:review-excerpt}).  This ordering guarantees that
-a hostile payload cannot reach the memory store.  The cost is one
-extra string scan per action; the benefit is that a
-prompt-injection attempt embedded in a tool response is flagged
-and emitted as \lstinline{HOSTILE\_TAINT\_DETECTED} before any
-subsequent reasoning cycle can read it.
-
-\begin{lstlisting}[
-  language=Java,
-  caption={Review.step() --- taint-first ordering
-           (\texttt{core/Review.java})},
-  label={lst:review-excerpt}]
-void step(ActionResult result, Decision decision,
-          Observations obs, ExecutionContext ctx,
-          Agent agent) {
-    // Phase 2a: classify BEFORE writing to memory
-    TaintLabel taint   = classifyResultTaint(result);
-    String     summary = summarize(result);
-    ctx.workingMemory().add(new WorkingMemoryEntry(
-        UUID.randomUUID().toString(), summary,
-        WorkingMemoryTier.ACTIVE, Origin.TOOL, 0.9,
-        Instant.now(), taint));
-    if (taint == TaintLabel.HOSTILE) {
-        events.emit(new AgentEvent(ctx.runId(), ctx.tenantId(),
-            AgentEvent.EventType.HOSTILE_TAINT_DETECTED,
-            Instant.now(), Map.of("summary",
-                summary.substring(0, Math.min(200, summary.length())))));
-    }
-    // Phase 2b..2f: context window, goals, beliefs, memory, termination
-    ctxManager.manage(ctx.workingMemory(), ctx.task().maxTokens());
-    updateGoals(result, decision, ctx);
-    updateBeliefs(result, ctx);
-    // long-term write-back and termination check follow ...
-}
-\end{lstlisting}
-\githubref{com.agentframework.core.Review}
-
-%% ------------------------------------------------------------
-\section{Interrupts and the StepExecutionException Design}
-\label{sec:interrupt-narrative}
-
-\begin{learningbox}
-After this section you will be able to distinguish internal
-interrupts (resource limits, stuck states) handled by
-\lstinline{terminate()} from external interrupts (HITL,
-Async\-Agent\-Runtime) that require an external snapshot holder.
-\end{learningbox}
-
-A run can be interrupted by two classes of signal: \emph{resource
-limits} detected by the runner itself, and \emph{external
-interrupts} that arrive while an action is in flight.
-
-\subsection{Internal Interrupts: The \texttt{terminate()} / \texttt{abort()} Contract}
-\label{subsec:internal-interrupts}
-
-The runner exposes two private helpers:
-\lstinline{terminate()} for expected, recoverable stops (resource
-limits, stuck states, plan incoherence) and \lstinline{abort()}
-for escalated, non-recoverable exits (the \lstinline{DEGRADED} path
-described in Table~\ref{tbl:state-transitions}).
-
-\begin{lstlisting}[
-  language=Java,
-  caption={terminate() and abort() --- two distinct exit
-           contracts (\texttt{core/StateMachineRunner.java})},
-  label={lst:terminate-abort}]
-// TERMINATED: resource limits, stuck, incoherence, delegation depth
-private void terminate(ExecutionContext ctx,
-        TerminationReason reason,
-        AgentEvent.EventType eventType,
-        Map<String,Object> attrs) {
-    ctx.setTerminationReason(reason);
-    ctx.transitionTo(RunState.TERMINATED);
-    emit(ctx, eventType, attrs);
-}
-
-// ABORTED: DEGRADED escalation only.
-// Spec: "a degraded run must either recover or be explicitly aborted."
-private void abort(ExecutionContext ctx,
-        TerminationReason reason,
-        AgentEvent.EventType eventType,
-        Map<String,Object> attrs) {
-    ctx.setTerminationReason(reason);
-    ctx.transitionTo(RunState.ABORTED);   // never TERMINATED
-    emit(ctx, eventType, attrs);
-}
-\end{lstlisting}
-\githubref{com.agentframework.core.StateMachineRunner}
-
-Calling \lstinline{terminate()} inside \lstinline{PLANNING} does
-not throw.  The next statement in the switch arm returns early,
-and the outer \lstinline{while} exits on the next
-\lstinline{isLive()} check.  There is no exception unwinding,
-no flag race, and no possibility of a partial state transition
-leaking out to callers.
-
-\subsection{External Interrupts: HITL and AsyncAgentRuntime}
-\label{subsec:external-interrupts}
-
-When a \lstinline{Decision.Escalate} is produced by reasoning,
-\lstinline{Review.step()} transitions the context to
-\lstinline{TERMINATED} (not \lstinline{SUSPENDED\_HITL}).  Actual
-parking at \lstinline{SUSPENDED\_HITL} is the responsibility of
-\lstinline{AsyncAgentRuntime} (covered in Chapter~6), which
-holds a reference to the live \lstinline{DefaultExecutionContext}
-after the run and can call \lstinline{ctx.checkpoint()} to detect
-and persist the suspension point.  The \lstinline{StateMachineRunner}
-itself never parks --- it always runs to a terminal state and returns.
-
-\begin{figure}[htbp]
-\centering
-\resizebox{\textwidth}{!}{%
-\begin{tikzpicture}[
-  node distance=0.85cm and 1.8cm,
-  every node/.style={font=\tiny\sffamily},
-  box/.style={draw=BookBlue,rounded corners=2pt,
-              fill=TipBg,minimum width=2.5cm,
-              minimum height=0.55cm,align=center},
-  term/.style={draw=CodeKeyword,rounded corners=2pt,
-               fill=WarningBg,minimum width=2.5cm,
-               minimum height=0.55cm,align=center},
-  ext/.style={draw=LearnBorder,rounded corners=2pt,
-              fill=LearnBg,minimum width=2.5cm,
-              minimum height=0.55cm,align=center},
-  arr/.style={-{Stealth[length=4pt]},BookMid,thick},
-  darr/.style={-{Stealth[length=4pt]},NoteBorder,dashed}
-]
-  \node[box]  (plan)  {PLANNING};
-  \node[term, right=of plan]    (term)  {TERMINATED};
-  \node[term, below=of term]    (abrt)  {ABORTED};
-  \node[term, right=of term]    (comp)  {COMPLETED};
-  \node[ext,  below=of plan]    (hitl)  {SUSPENDED\_HITL};
-  \node[ext,  right=of hitl]    (async) {AsyncAgentRuntime};
-
-  \draw[arr]  (plan) -- node[above]{\tiny resource / stuck} (term);
-  \draw[arr]  (plan) -- node[above]{\tiny goal achieved} (comp);
-  \draw[arr]  (plan) edge[bend right=15]
-              node[left]{\tiny DEGRADED} (abrt);
-  \draw[darr] (plan) -- node[right]{\tiny Escalate} (hitl);
-  \draw[darr] (hitl) -- node[above]{\tiny checkpoint()} (async);
-\end{tikzpicture}%
-}
-\caption{Fig~2.2 --- Interrupt topology.
-  Solid arrows are transitions owned by \texttt{StateMachineRunner};
-  dashed arrows require an external holder
-  (\texttt{AsyncAgentRuntime}) to persist the suspension point.}
-\label{fig:interrupt-topology}
-\end{figure}
-
-%% ------------------------------------------------------------
-\section{What the Loop Does Not Do}
-\label{sec:what-loop-does-not-do}
-
-\begin{learningbox}
-After this section you will be able to name the six concerns
-that \lstinline{StateMachineRunner} explicitly refuses to own and
-identify the collaborator responsible for each one.
-\end{learningbox}
 
 \begin{notebox}
-\textbf{What \texttt{StateMachineRunner} deliberately does not do:}
-\begin{itemize}
-  \item \textbf{Scheduling.}  The runner is synchronous and
-        single-threaded.  All threading lives in
-        \lstinline{AgentRuntime.executeAsync()} and the injected
-        \lstinline{ExecutorService}.
-  \item \textbf{Serialisation.}  Snapshot creation and integrity
-        hashing live in \lstinline{DefaultExecutionContext}, not
-        in the runner.  The runner only calls
-        \lstinline{ctx.transitionTo()} and reads
-        \lstinline{ctx.currentState()}.
-  \item \textbf{Memory management.}  Context-window eviction and
-        working-memory limits are delegated entirely to
-        \lstinline{ContextWindowManager} inside \lstinline{Review}.
-  \item \textbf{Taint policy.}  The runner receives a
-        \lstinline{TaintClassifier} instance; it does not compile
-        patterns or define what ``hostile'' means.
-  \item \textbf{Tenant policy.}  Tool-allowlist enforcement is the
-        job of \lstinline{TenantPolicyEngine} inside
-        \lstinline{PlanValidator} --- never of the runner.
-  \item \textbf{Retry.}  There are no retry loops inside
-        \lstinline{step()}.  The \lstinline{NeedsCorrection}
-        path flags a stale plan and returns to
-        \lstinline{VALIDATING}; the next full cycle is the retry.
-\end{itemize}
+  \textbf{What the Loop Does Not Do}
+
+  The loop does not parse model output.
+  It does not own memory policies.
+  It does not know which tool to call.
+  It does not embed security logic.
+  It does not know whether the transport is HTTP, MCP, or A2A.
+  All of those decisions live in collaborating packages —
+  \texttt{orchestrator/reasoning}, \texttt{memory}, \texttt{security},
+  \texttt{protocols} — that the loop invokes through narrow interfaces.
+  The loop's only job is advancing state and recording evidence.
 \end{notebox}
 
-This distribution of responsibility is what makes the runner
-testable in isolation.  A unit test can construct a
-\lstinline{StateMachineRunner} with a stub \lstinline{PlanValidator},
-a no-op \lstinline{EventSink}, and a minimal \lstinline{Agent} whose
-\lstinline{Reasoning} is a lambda, and exercise every transition in
-Table~\ref{tbl:state-transitions} without touching a network
-socket, a database, or a real language model.
+% ------------------------------------------------------------------
+\section{Executor Service}
+\label{sec:executor-service}
+% ------------------------------------------------------------------
 
-%% ------------------------------------------------------------
-\section{Replay: Re-entering the Loop from a Snapshot}
-\label{sec:replay}
+A scheduler makes two decisions: when a run is admitted, and how many runs may
+advance concurrently.
+Both decisions are outside the run loop itself.
+The loop knows nothing about the scheduler; the scheduler knows nothing about what
+happens inside a step.
+This separation is what allows the admission policy to change — from a fixed
+concurrency limit to a priority queue, for example — without touching the loop.
 
-\begin{learningbox}
-After this section you will be able to describe the three steps
-of deterministic replay and explain why the integrity check must
-run before any side-effecting code.
-\end{learningbox}
+\texttt{AgentTask}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentTask.java}}
+is the unit of scheduled work: it carries the run identifier, the request payload,
+and any metadata the scheduler needs to make an admission decision.
+\texttt{AgentRunner}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentRunner.java}}
+is the component that submits \texttt{AgentTask} instances to the virtual-thread
+executor and tracks their lifecycle.
+Virtual threads make the scheduling model straightforward: each run advances on its
+own virtual thread, blocking on I/O without consuming a platform thread.
+The semaphore admission guard prevents runaway concurrency when the model endpoint
+is slow.
 
-Deterministic replay, introduced in Chapter~1 as runtime
-requirement~2, is implemented in \lstinline{AgentRuntime.replay()}.
-The method does three things: verify the integrity hash, build a
-\lstinline{Task} from the snapshot's root goal, and construct a
-fresh \lstinline{DefaultExecutionContext} restored from the
-snapshot before handing it to \lstinline{StateMachineRunner}
-(Listing~\ref{lst:replay-excerpt}).
+The two framework types are small enough to excerpt in full:
 
-\begin{lstlisting}[
-  language=Java,
-  caption={AgentRuntime.replay() --- snapshot verification and
-           context restoration (\texttt{core/AgentRuntime.java})},
-  label={lst:replay-excerpt}]
-public ExecutionResult replay(
-        ExecutionContext.Snapshot snapshot,
-        Agent agent, String tenantId, String userId) {
-    verifyIntegrity(snapshot);        // throws on hash mismatch
-    Task replayTask = buildReplayTask(snapshot);
-    DefaultExecutionContext ctx =
-        new DefaultExecutionContext(replayTask, tenantId, userId);
-    ctx.restoreFromSnapshot(snapshot);
-    emit(ctx, AgentEvent.EventType.RUN_STARTED, Map.of(
-        "instruction", replayTask.instruction(),
-        "replayFrom",  snapshot.cycle()));
-    new StateMachineRunner(validator, events).run(agent, ctx);
-    emit(ctx, AgentEvent.EventType.RUN_COMPLETED,
-        Map.of("state", ctx.currentState().name()));
-    return ExecutionResult.from(ctx);
+\begin{lstlisting}[language=Java,caption={\texttt{AgentTask} — \texttt{orchestrator/AgentTask.java}},label={lst:agent-task}]
+// Source: orchestrator/AgentTask.java
+public record AgentTask(
+    RunId runId,
+    AgentRequest request,
+    Instant submittedAt
+) {}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Java,caption={\texttt{AgentRunner} interface — \texttt{orchestrator/AgentRunner.java}},label={lst:agent-runner}]
+// Source: orchestrator/AgentRunner.java
+public interface AgentRunner {
+    CompletableFuture<AgentResult> submit(AgentTask task);
+    void shutdown();
 }
 \end{lstlisting}
-\githubref{com.agentframework.core.AgentRuntime}
 
-\lstinline{verifyIntegrity()} recomputes the SHA-256 hash over all
-counters in the snapshot schema and throws
-\lstinline{IllegalArgumentException} if the stored hash does not
-match.  A tampered or schema-mismatched snapshot is rejected
-before any side-effecting code runs.
+% ------------------------------------------------------------------
+\section{Interrupts}
+\label{sec:interrupts}
+% ------------------------------------------------------------------
+
+Forced thread interruption is the wrong model for agent runs.
+A run that is forcibly killed leaves its working memory, step records, and tool
+side-effects in an inconsistent state.
+Cooperative interruption — the run checks for a pause or cancel signal at each
+state transition boundary — is the only approach compatible with deterministic
+replay and clean resume semantics.
+
+\subsection{Pause and Resume}
+\label{subsec:pause-resume}
+
+A pause signal transitions the run to \texttt{PAUSED} at the next state transition
+boundary.
+The run's current \texttt{RunSnapshot} is persisted through \texttt{RunRepository}
+before the loop yields.
+A resume signal transitions the run from \texttt{PAUSED} back to \texttt{PLANNING},
+where it reassembles its context from the persisted snapshot and continues from
+exactly the point at which it was paused.
+No work is repeated.
+
+\subsection{Cancellation and Timeout}
+\label{subsec:cancel-timeout}
+
+Cancellation transitions the run to \texttt{CANCELLED}.
+Timeout transitions the run to \texttt{TIMED\_OUT}.
+Both are terminal states: the run loop exits, all resources are released, and the
+failure type is recorded in the \texttt{RunSnapshot} for downstream consumers.
+
+The lifecycle controls are exposed through
+\texttt{AgentLifecycle}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentLifecycle.java}},
+which is the interface that callers use to pause, resume, and cancel a run without
+direct access to the run loop or the scheduler internals.
 
 \begin{warningbox}
-Always verify snapshot integrity before replay.  A snapshot that
-passes the integrity check but was produced by a different schema
-version must be migrated using the version adapter before replay.
-The \lstinline{schemaVersion} field on
-\lstinline{ExecutionContext.Snapshot} carries the version string;
-checking it before calling \lstinline{replay()} is the caller's
-responsibility.
+  Forced thread interruption is not the right model for agent runs.
+  A run that is forcibly killed leaves its working memory, step records,
+  and tool side-effects in an inconsistent state.
+  Cooperative interruption — the run checks for a pause signal at each
+  state transition boundary — is the only approach compatible with
+  deterministic replay and clean resume semantics.
 \end{warningbox}
 
-%% ------------------------------------------------------------
-\section{Testing the Runner in Isolation}
-\label{sec:testing-runner}
+% ------------------------------------------------------------------
+\section{Model Client}
+\label{sec:model-client}
+% ------------------------------------------------------------------
 
-\begin{learningbox}
-After this section you will be able to write a complete runner
-unit test using only lambdas and a stub validator, with no
-network, database, or live model.
-\end{learningbox}
+The model client boundary is one of the most important seams in the framework.
+Its purpose is to prevent any provider-specific type — OpenAI's
+\texttt{ChatCompletionRequest}, Anthropic's \texttt{MessageCreateParams}, or any
+other vendor SDK class — from appearing inside the runtime loop or the orchestrator.
+The runtime speaks only \texttt{ModelClient}; the provider implementation
+translates between the framework's vocabulary and the provider's API in the
+adapter layer.
 
-Because \lstinline{StateMachineRunner} is package-private and
-accepts all collaborators through its constructor, the full state
-machine can be exercised without any external infrastructure.
+The \texttt{ModelClient} interface lives in
+\texttt{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/}}.
+The interface declares only the method signatures: the caller passes a prompt in
+the framework's vocabulary and receives a response in the framework's vocabulary.
+Every provider detail lives behind the implementation.
 
-\begin{lstlisting}[
-  language=Java,
-  caption={Unit test pattern --- all transitions covered with
-           lambdas and a stub validator},
-  label={lst:runner-test}]
-AgentRuntime runtime = new AgentRuntime(
-    new PassThroughPlanValidator(),
-    EventSink.noop());
-Agent agent = new Agent.Builder()
-    .name("test")
-    .perception(ctx -> Observations.empty())
-    .reasoning((ctx, obs) -> Decision.finalAnswer("done"))
-    .action((dec, ctx) -> ActionResult.success(ToolResult.of("ok")))
-    .memory(MemoryAdapter.noop())
-    .build();
-Task task = Task.builder()
-    .instruction("test")
-    .maxCycles(5)
-    .maxTokens(10_000)
-    .build();
-ExecutionResult result = runtime.execute(agent, task);
-assertEquals(RunState.COMPLETED, result.finalState());
-\end{lstlisting}
+The test double (fake model client) is architecturally as important as the real
+implementation.
+A \texttt{FakeModelClient} that returns a fixed or scripted response sequence allows
+the full run loop to be exercised in a test that runs in under 100 milliseconds
+with no network access.
+The fake model client is not a test convenience — it is evidence that the model
+client boundary is genuinely narrow.
 
 \begin{tipbox}
-Use \lstinline{EventSink.capturing()} instead of
-\lstinline{EventSink.noop()} to assert that specific events were
-emitted in the correct order.  This is the preferred way to
-verify the event taxonomy from Chapter~1 in integration tests.
+  Write the fake before you write the real implementation.
+  If the fake requires more than twenty lines, the \texttt{ModelClient} interface
+  is too wide.
+  A narrow interface has a narrow fake.
 \end{tipbox}
 
-\begin{takeawaybox}{Chapter 2 Takeaways}
-\lstinline{StateMachineRunner} is a pure orchestrator: it drives
-the \lstinline{RunState} machine through a single
-\lstinline{while~(isLive())} loop and delegates every domain
-decision---scheduling, serialisation, taint, tenant policy, and
-retry---to six injected collaborators, making the entire runtime
-testable with lambdas and a stub validator.
-The two-phase execute-then-review model, the
-\lstinline{DEGRADED}\,\textrightarrow\,\lstinline{ABORTED} C4 fix,
-and the pre-write taint check are the three design decisions that
-distinguish a production-grade loop from a na\"ive one.
+\begin{takeawaybox}
+  Chapter~2 implements the three mechanical components of the framework:
+  the guarded state machine, the virtual-thread scheduler, and the cooperative
+  interrupt handler.
+  None of them contain domain logic.
+  Domain logic — memory selection, tool dispatch, orchestration decisions —
+  is the subject of Chapter~3.
 \end{takeawaybox}
