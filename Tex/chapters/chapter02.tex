@@ -277,6 +277,71 @@ public interface AgentRunner {
 }
 \end{lstlisting}
 
+%% ----------------------------------------------------------------
+%% FIGURE 2.2 — Concurrency model: across runs vs. within a run
+%% Edit 2-C: inserted after lst:agent-runner
+%% ----------------------------------------------------------------
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small\sffamily,
+  run/.style={draw, rounded corners=3pt, fill=teal!14,
+              minimum width=1.5cm, minimum height=0.48cm, align=center,
+              font=\fontsize{7}{8}\selectfont\ttfamily},
+  banned/.style={draw=red!70!black, very thick, rounded corners=3pt,
+                 fill=red!8, minimum width=1.5cm,
+                 minimum height=0.48cm, align=center,
+                 font=\fontsize{7}{8}\selectfont\ttfamily},
+  arr/.style={-Stealth, thick},
+  note/.style={font=\fontsize{7}{8}\selectfont\itshape\sffamily,
+               text=gray!70!black}
+]
+
+%% ---- LEFT panel: across runs (allowed) ----
+\node[font=\small\bfseries\sffamily] at (2.8, 3.6)
+      {Concurrency \emph{across} runs~\checkmark};
+
+\foreach \r/\label in {1/{Run\,A}, 2/{Run\,B}, 3/{Run\,C}} {
+  \pgfmathsetmacro{\y}{3.6 - \r * 0.95}
+  \node[font=\fontsize{7}{8}\selectfont\sffamily, anchor=east]
+        at (0.4, \y) {\label};
+  \node[run] (s\r a) at (1.4, \y) {S1};
+  \node[run] (s\r b) at (2.8, \y) {S2};
+  \node[run] (s\r c) at (4.2, \y) {S3};
+  \draw[arr, gray!60] (s\r a.east) -- (s\r b.west);
+  \draw[arr, gray!60] (s\r b.east) -- (s\r c.west);
+}
+\node[note] at (2.8, 0.3) {one virtual thread per run};
+
+%% ---- RIGHT panel: within one run (prevented) ----
+\node[font=\small\bfseries\sffamily] at (9.0, 3.6)
+      {Concurrency \emph{within} a run~\texttimes};
+
+\node[run]    (rs1)  at (7.2, 2.5) {PLANNING};
+\node[banned] (rs2a) at (9.0, 3.1) {MODEL\_CALL};
+\node[banned] (rs2b) at (9.0, 1.9) {MODEL\_CALL};
+
+\draw[arr] (rs1.east) -- (rs2a.west);
+\draw[arr] (rs1.east) -- (rs2b.west);
+
+%% Red X
+\draw[line width=2pt, red!70!black]
+  (8.0, 1.5) -- (10.0, 3.5);
+\draw[line width=2pt, red!70!black]
+  (10.0, 1.5) -- (8.0, 3.5);
+
+\node[note, text=red!70!black] at (9.0, 1.1)
+      {\texttt{IllegalStateException}};
+
+\end{tikzpicture}
+\caption{Concurrency model. Parallelism \emph{across} runs is safe and
+  expected: each \texttt{Run} advances on its own virtual thread (left).
+  Parallelism \emph{within} a single run is prevented: two concurrent
+  state transitions on the same \texttt{Run} instance throw
+  \texttt{IllegalStateException} immediately (right).}
+\label{fig:concurrency-model}
+\end{figure}
+
 % ------------------------------------------------------------------
 \section{Interrupts}
 \label{sec:interrupts}
@@ -291,6 +356,20 @@ replay and clean resume semantics.
 
 \subsection{Pause and Resume}
 \label{subsec:pause-resume}
+
+\begin{lstlisting}[language=Java,
+  caption={\texttt{AgentLifecycle} --- lifecycle control interface
+           (\texttt{orchestrator/AgentLifecycle.java})},
+  label={lst:agent-lifecycle}]
+// Source: orchestrator/AgentLifecycle.java
+// V-ISP-01: clients that only need lifecycle control depend on this interface.
+public interface AgentLifecycle {
+    void suspend(String executionId);
+    void resume(String executionId);
+    void terminate(String executionId, String reason);
+}
+\end{lstlisting}
+% Source: orchestrator/AgentLifecycle.java
 
 A pause signal transitions the run to \texttt{PAUSED} at the next state transition
 boundary.

@@ -49,6 +49,72 @@ Procedural & Reusable task patterns & Yes & \texttt{memory/procedural} \\
 \label{sec:memory}
 % ------------------------------------------------------------------
 
+%% ----------------------------------------------------------------
+%% FIGURE 3.2 — Memory tier wiring
+%% Edit 3-E: inserted at start of \sec:memory
+%% ----------------------------------------------------------------
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small\sffamily,
+  box/.style={draw, rounded corners=4pt, minimum width=3.4cm,
+              minimum height=0.68cm, align=center,
+              fill=gray!10, draw=gray!50},
+  tier/.style={box, minimum width=2.8cm, fill=teal!12, draw=teal!40},
+  arr/.style={-Stealth, thick},
+  note/.style={font=\fontsize{7}{8}\selectfont\itshape\sffamily,
+               text=gray!70!black}
+]
+
+%% Runtime loop (top)
+\node[box, minimum width=4.0cm, fill=gray!18]
+      (loop) at (4.0, 3.8) {Runtime Loop};
+
+%% MemoryPolicy (middle)
+\node[box, minimum width=3.4cm, fill=teal!20, draw=teal!50]
+      (pol) at (4.0, 2.4) {\texttt{MemoryPolicy}};
+\node[note] at (4.0, 1.9) {context-window selection};
+
+%% Four tiers (bottom row)
+\node[tier] (work) at (0.0,  0.7) {\texttt{WorkingMemoryStore}};
+\node[tier] (ep)   at (2.7,  0.7) {\texttt{EpisodicStore}};
+\node[tier] (sem)  at (5.4,  0.7) {\texttt{SemanticStore}};
+\node[tier] (proc) at (8.1,  0.7) {\texttt{ProceduralStore}};
+
+%% Scope labels
+\node[note] at (0.0, 0.1) {in-run};
+\node[note] at (2.7, 0.1) {cross-run};
+\node[note] at (5.4, 0.1) {world knowledge};
+\node[note] at (8.1, 0.1) {task patterns};
+
+%% Builder
+\node[box, fill=blue!8, draw=blue!30, minimum width=2.2cm]
+      (builder) at (10.4, 2.4) {\texttt{Builder}};
+\node[note, anchor=west] at (10.4, 1.85) {wires backends};
+
+%% Arrows: loop -> policy -> tiers
+\draw[arr] (loop.south) -- node[right, note] {selects via} (pol.north);
+\draw[arr] (pol.south) -| (work.north);
+\draw[arr] (pol.south) -| (ep.north);
+\draw[arr] (pol.south) -| (sem.north);
+\draw[arr] (pol.south) -| (proc.north);
+
+%% Builder injection arrows
+\draw[arr, dashed, blue!60] (builder.west)
+      -- node[above, note, text=blue!70] {injects} (pol.east);
+\draw[arr, dashed, blue!60] (builder.south)
+      |- node[below right, note, text=blue!70] {injects backends}
+      (sem.east);
+
+\end{tikzpicture}
+\caption{Memory tier wiring at runtime.
+  \texttt{MemoryPolicy} is the sole intermediary between the runtime loop
+  and all four memory tiers; the loop never imports a backend type directly.
+  All wiring is performed by the builder at construction time through
+  constructor injection.}
+\label{fig:memory-tier-wiring}
+\end{figure}
+
 The runtime does not choose a memory backend.
 It calls \texttt{MemoryStore}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}},
 which is a narrow interface.
@@ -88,6 +154,121 @@ public class WorkingMemoryStore {
     public int size() { return store.size(); }
 }
 \end{lstlisting}
+
+%% ----------------------------------------------------------------
+%% NEW SUBSECTION — Durable Memory Tiers
+%% Edit 3-B: inserted after lst:working-memory, before notebox
+%% ----------------------------------------------------------------
+\subsection{Durable Memory Tiers}
+\label{subsec:durable-memory-tiers}
+
+Working memory holds the in-flight context for one run and is discarded
+when the run ends.  The three durable tiers persist across run boundaries
+and are the primary knowledge substrate for agents that reason over time.
+
+\subsubsection*{Episodic Memory}
+
+Episodic memory records what the agent did, not what it knows.  Each entry
+is a time-stamped summary of an execution episode associated with an agent
+identifier.  \texttt{EpisodicStore}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/episodic/EpisodicStore.java}}
+exposes two retrieval paths: recall by agent and recall of the $n$ most
+recent episodes regardless of agent.
+
+\begin{lstlisting}[language=Java,
+  caption={\texttt{EpisodicStore} --- thread-safe episode storage
+           (\texttt{memory/episodic/EpisodicStore.java})},
+  label={lst:episodic-store}]
+// Source: memory/episodic/EpisodicStore.java
+public class EpisodicStore {
+
+    public record Episode(
+            MemoryRecordId      id,
+            String              agentId,
+            String              summary,
+            Instant             timestamp,
+            Map<String, Object> context) { ... }
+
+    // Store an episode; returns its generated id.
+    public MemoryRecordId store(
+            String agentId,
+            String summary,
+            Map<String, Object> context) { ... }
+
+    // All episodes for a given agent.
+    public List<Episode> recallByAgent(String agentId) { ... }
+
+    // The n most recent episodes across all agents.
+    public List<Episode> recallRecent(int n) { ... }
+}
+\end{lstlisting}
+% Source: memory/episodic/EpisodicStore.java
+
+The store is backed by a \texttt{CopyOnWriteArrayList}, so concurrent
+reads never block writes.  In development, the same instance serves all
+agents; in production, partition by \texttt{agentId} or scope by
+execution context to avoid cross-agent episode leakage.
+
+\subsubsection*{Semantic Memory}
+
+Semantic memory stores general world knowledge as concept--definition
+pairs.  It is the durable tier most likely to be backed by a vector
+database in production; the in-process implementation uses a
+\texttt{ConcurrentHashMap} keyed on the lower-cased concept string.
+
+\begin{lstlisting}[language=Java,
+  caption={\texttt{SemanticStore} --- concept store with contradiction
+           detection (\texttt{memory/semantic/SemanticStore.java})},
+  label={lst:semantic-store}]
+// Source: memory/semantic/SemanticStore.java
+public class SemanticStore {
+
+    // Store or overwrite a concept.
+    // Contradiction recorded when definition changes (G-16).
+    public MemoryRecordId store(
+            String concept,
+            String definition,
+            Map<String, Object> attributes) { ... }
+
+    public Optional<SemanticEntry> lookup(String concept) { ... }
+
+    public List<SemanticEntry> search(String keyword) { ... }
+
+    // Audit trail of all definition conflicts -- never cleared.
+    public List<ConceptConflict> conceptConflicts() { ... }
+}
+\end{lstlisting}
+% Source: memory/semantic/SemanticStore.java
+
+\begin{notebox}
+\textbf{Contradiction detection (G-16).}  When
+\texttt{store(concept, definition, ...)} is called with a concept
+that already exists but a different definition, a
+\texttt{ConceptConflict} record is appended to the audit trail
+instead of silently overwriting the old entry.  Query
+\texttt{conceptConflicts()} after any bulk import to surface
+inconsistencies before they reach the model's context window.
+\end{notebox}
+
+\subsubsection*{Procedural Memory}
+
+Procedural memory stores reusable task patterns — partial plans, tool
+call sequences, or prompt templates that proved effective for a class of
+goals.  The framework provides a \texttt{ProceduralStore} in the
+\texttt{memory/procedural} package.  Its API mirrors
+\texttt{EpisodicStore}: a \texttt{store()} write path and a keyword
+\texttt{search()} read path.  Because procedural entries encode
+\emph{how} rather than \emph{what}, they are typically written by the
+orchestrator at run completion and read at the perception stage of the
+next run.
+
+\begin{tipbox}
+In development, wire all three durable tiers to their in-process
+implementations.  The runtime loop only calls into the tier through
+\texttt{MemoryPolicy}; swapping from the in-process store to a
+production backend — a PostgreSQL-backed episodic store, a
+Pinecone-backed semantic store — requires changing a single constructor
+argument in the builder.  No runtime code changes.
+\end{tipbox}
 
 For durable memory tiers the framework differentiates between tiers at the type level
 through distinct interfaces and package structures under
