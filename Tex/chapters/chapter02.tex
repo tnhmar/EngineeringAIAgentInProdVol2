@@ -75,17 +75,75 @@ private boolean isLegalTransition(RunState from, RunState to) {
 \toprule
 \textbf{From state} & \textbf{Legal next states} \\
 \midrule
-\texttt{QUEUED}          & \texttt{PLANNING}, \texttt{CANCELLED} \\
-\texttt{PLANNING}        & \texttt{MODEL\_CALL}, \texttt{PAUSED}, \texttt{FAILED}, \texttt{CANCELLED} \\
-\texttt{MODEL\_CALL}    & \texttt{PLANNING}, \texttt{TOOL\_EXECUTION}, \texttt{RESPONDING},
-                           \texttt{PAUSED}, \texttt{FAILED}, \texttt{TIMED\_OUT}, \texttt{CANCELLED} \\
-\texttt{TOOL\_EXECUTION}& \texttt{PLANNING}, \texttt{PAUSED}, \texttt{FAILED}, \texttt{CANCELLED} \\
-\texttt{MEMORY\_UPDATE} & \texttt{PLANNING}, \texttt{PAUSED}, \texttt{FAILED} \\
-\texttt{RESPONDING}      & \texttt{COMPLETED}, \texttt{FAILED} \\
-\texttt{PAUSED}          & \texttt{PLANNING}, \texttt{CANCELLED} \\
+\texttt{QUEUED}          & \texttt{PLANNING},\; \texttt{CANCELLED} \\
+\texttt{PLANNING}        & \texttt{MODEL\_CALL},\; \texttt{PAUSED},\; \texttt{FAILED},\; \texttt{CANCELLED} \\
+\texttt{MODEL\_CALL}    & \texttt{PLANNING},\; \texttt{TOOL\_EXECUTION},\; \texttt{RESPONDING},\;
+                           \texttt{PAUSED},\; \texttt{FAILED},\; \texttt{TIMED\_OUT},\; \texttt{CANCELLED} \\
+\texttt{TOOL\_EXECUTION}& \texttt{PLANNING},\; \texttt{PAUSED},\; \texttt{FAILED},\; \texttt{CANCELLED} \\
+\texttt{MEMORY\_UPDATE} & \texttt{PLANNING},\; \texttt{PAUSED},\; \texttt{FAILED} \\
+\texttt{RESPONDING}      & \texttt{COMPLETED},\; \texttt{FAILED} \\
+\texttt{PAUSED}          & \texttt{PLANNING},\; \texttt{CANCELLED} \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+% ------------------------------------------------------------------
+% Figure 2.1 — Complete Run state machine
+% ------------------------------------------------------------------
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\small\ttfamily},
+  state/.style={draw, circle, minimum size=1.55cm, text centered,
+                inner sep=1pt, font=\fontsize{7}{8}\selectfont\ttfamily},
+  term/.style={state, double, double distance=2pt, fill=gray!18},
+  arr/.style={->, >=stealth, semithick},
+  lbl/.style={font=\fontsize{6}{7}\selectfont, midway},
+  bend angle=20
+]
+  % ---- non-terminal states ----
+  \node[state]             (Q)   at (0,    0)     {QUEUED};
+  \node[state]             (P)   at (3.2,  0)     {PLANNING};
+  \node[state]             (M)   at (6.4,  1.5)   {MODEL\\CALL};
+  \node[state]             (T)   at (6.4, -1.5)   {TOOL\\EXEC};
+  \node[state]             (MU)  at (9.6,  0)     {MEM\\UPDATE};
+  \node[state]             (R)   at (9.6, -2.6)   {RESPONDING};
+  \node[state]             (PA)  at (3.2,  3.0)   {PAUSED};
+
+  % ---- terminal states (double border) ----
+  \node[term]              (CO)  at (12.8, -1.5)  {COMPLETED};
+  \node[term]              (FA)  at (12.8,  0.8)  {FAILED};
+  \node[term]              (CA)  at (0,    3.0)   {CANCELLED};
+  \node[term]              (TO)  at (6.4,  3.0)   {TIMED\\OUT};
+
+  % ---- main flow ----
+  \draw[arr] (Q)  -- (P);
+  \draw[arr] (P)  -- (M);
+  \draw[arr] (M)  -- (T)  node[lbl, right]{tool call};
+  \draw[arr] (M)  to[bend left]  node[lbl, above]{re-plan} (P);
+  \draw[arr] (T)  to[bend right] node[lbl, below]{result}  (P);
+  \draw[arr] (M)  -- (MU) node[lbl, above]{mem write};
+  \draw[arr] (MU) to[bend left]  (P);
+  \draw[arr] (M)  -- (R)  node[lbl, right]{final ans};
+  \draw[arr] (R)  -- (CO);
+
+  % ---- interrupt / terminal transitions ----
+  \draw[arr] (Q)  -- (CA);
+  \draw[arr] (P)  -- (PA);
+  \draw[arr] (PA) -- (CA);
+  \draw[arr] (PA) to[bend right=12] node[lbl, right]{resume} (P);
+  \draw[arr] (M)  -- (TO);
+  \draw[arr] (P)  -- (FA);
+  \draw[arr] (M)  -- (FA);
+  \draw[arr] (T)  -- (FA);
+  \draw[arr] (R)  -- (FA);
+\end{tikzpicture}
+\caption{Complete \texttt{Run} state machine. Double-bordered nodes are terminal
+  (\texttt{COMPLETED}, \texttt{FAILED}, \texttt{CANCELLED}, \texttt{TIMED\_OUT}).
+  \texttt{PLANNING} is both the entry state after queuing and the re-entry point
+  after every non-terminal model response.}
+\label{fig:run-state-machine}
+\end{figure}
 
 The transition from \texttt{MODEL\_CALL} to \texttt{PLANNING} deserves explanation.
 When the model returns a response that requires further deliberation — a
@@ -306,22 +364,23 @@ The test double is architecturally as important as the real implementation.
 The framework ships a \texttt{StubModelClient}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/StubModelClient.java}}
 that returns a fixed or scripted response sequence — a tool call on the first
 invocation, then a direct answer — allowing the full run loop to be exercised
-in a test that runs in under 100 milliseconds with no network access.
+in a test that runs in under 100\,milliseconds with no network access.
 The stub is not a test convenience; it is evidence that the \texttt{ModelClient}
-boundary is genuinely narrow: a single-method interface has a single-method fake.
+boundary is genuinely narrow.
 
 \begin{tipbox}
-  Write the fake before you write the real implementation.
-  If the fake requires more than twenty lines, the \texttt{ModelClient} interface
-  is too wide.
-  A narrow interface has a narrow fake.
+  Always write the fake model client before the real one.
+  A \texttt{StubModelClient} that returns scripted responses in sequence lets you
+  drive the full run loop — \texttt{QUEUED} through \texttt{COMPLETED} — from
+  a unit test in milliseconds.
+  If the fake is hard to write, the interface is too wide.
 \end{tipbox}
 
 \begin{takeawaybox}
-  Chapter~2 implements the three mechanical components of the framework:
-  the guarded state machine, the virtual-thread scheduler, and the cooperative
-  interrupt handler.
-  None of them contain domain logic.
-  Domain logic — memory selection, tool dispatch, orchestration decisions —
-  is the subject of Chapter~3.
+  The four components in this chapter — the \texttt{Run} aggregate, the
+  executor service, the interrupt protocol, and the model client boundary —
+  are the operational core of the framework.
+  Everything in Parts~2 through~4 runs on top of them.
+  Nothing in those parts changes these four components; it only adds behaviour
+  to the packages that these components delegate to.
 \end{takeawaybox}
