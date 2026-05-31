@@ -82,6 +82,51 @@ Testability-first  & Slow test suite — every test requires a live model endpoi
 \end{takeawaybox}
 
 % ------------------------------------------------------------------
+% Figure 1.1 — Framework layer architecture and dependency direction
+% ------------------------------------------------------------------
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw, rounded corners=4pt, minimum width=9cm,
+                minimum height=0.72cm, text centered, font=\small\ttfamily},
+  proto/.style={layer,  fill=gray!15},
+  sec/.style={layer,    fill=orange!18},
+  obs/.style={layer,    fill=yellow!22},
+  domain/.style={layer, fill=teal!18},
+  orch/.style={layer,   fill=blue!15},
+  core/.style={layer,   fill=blue!30},
+  arr/.style={->, thick, >=stealth}
+]
+  \node[proto]  (proto)  at (0, 5.4) {protocols — HTTP / MCP / A2A adapters};
+  \node[sec]    (sec)    at (0, 4.4) {security — PolicyEngine, SecretResolver};
+  \node[obs]    (obs)    at (0, 3.4) {observability — EventPublisher, exporters};
+  \node[domain] (domain) at (0, 2.4) {tooling + memory — ToolRegistry, MemoryStore};
+  \node[orch]   (orchn)  at (0, 1.4) {orchestrator — AgentOrchestrator, AgentRunner};
+  \node[core]   (coren)  at (0, 0.4) {runtime/run — Run, RunState, RunRepository};
+
+  \draw[arr] (proto.south)  -- (sec.north);
+  \draw[arr] (sec.south)    -- (obs.north);
+  \draw[arr] (obs.south)    -- (domain.north);
+  \draw[arr] (domain.south) -- (orchn.north);
+  \draw[arr] (orchn.south)  -- (coren.north);
+
+  \node[font=\footnotesize, right=0.4cm of coren]  {Ch\,1--2};
+  \node[font=\footnotesize, right=0.4cm of orchn]  {Ch\,2--3};
+  \node[font=\footnotesize, right=0.4cm of domain] {Ch\,3};
+  \node[font=\footnotesize, right=0.4cm of obs]    {Ch\,2,\,4};
+  \node[font=\footnotesize, right=0.4cm of sec]    {Ch\,4};
+  \node[font=\footnotesize, right=0.4cm of proto]  {Ch\,4};
+
+  \node[font=\small\itshape, below=0.3cm of coren]
+    {Dependencies point inward — upper layers depend on lower; never the reverse.};
+\end{tikzpicture}
+\caption{Framework layer architecture. Arrows show the allowed dependency
+  direction. Each layer may only import types from layers below it.
+  Chapter references indicate where each layer is implemented.}
+\label{fig:layer-architecture}
+\end{figure}
+
+% ------------------------------------------------------------------
 \section{Testability and Observability}
 \label{sec:testability-and-observability}
 % ------------------------------------------------------------------
@@ -186,10 +231,10 @@ and how they interact with persistence.
 \toprule
 \textbf{Model} & \textbf{Blocking cost} & \textbf{Cancellation} & \textbf{State replay} \\
 \midrule
-Platform threads        & High (1 MB stack each)  & Thread.interrupt()  & Possible \\
-Virtual threads (JDK 21)& Low (continuation-based)& Thread.interrupt()  & Possible \\
-Reactive streams        & None                    & Subscription.cancel()& Complex \\
-Structured concurrency  & Low                     & ShutdownOnFailure   & Possible \\
+Platform threads        & High (1 MB stack each)  & Thread.interrupt()    & Possible \\
+Virtual threads (JDK 21)& Low (continuation-based)& Thread.interrupt()    & Possible \\
+Reactive streams        & None                    & Subscription.cancel() & Complex  \\
+Structured concurrency  & Low                     & ShutdownOnFailure     & Possible \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -469,6 +514,9 @@ documented failure modes.
 The interface catalogue in Section~\ref{subsec:interface-catalogue} and the
 \texttt{RunState} enum in Listing~\ref{lst:run-state} are the only two deliverables;
 everything else in this chapter is motivation.
+
+Figure~\ref{fig:layer-architecture} shows how the six invariants map to the six
+framework layers and the direction of allowed dependencies between them.
 
 Chapter~2 implements the state machine loop and executor dispatch using the types
 defined here, with all listings drawn from the framework repository.
