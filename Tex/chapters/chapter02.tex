@@ -87,7 +87,7 @@ private boolean isLegalTransition(RunState from, RunState to) {
 \end{tabular}
 \end{table}
 
-The \texttt{MODEL\_CALL \to PLANNING} transition deserves explanation.
+The transition from \texttt{MODEL\_CALL} to \texttt{PLANNING} deserves explanation.
 When the model returns a response that requires further deliberation — a
 multi-step plan, a clarification request, or a tool result that changes the
 reasoning context — the orchestrator transitions back to \texttt{PLANNING}
