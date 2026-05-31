@@ -1,531 +1,490 @@
-% ============================================================
-%  CHAPTER 1 — Design Principles Before Writing Code
-%  EXPANDED — Part 1 fix pass (report §Ch.1 +17 pages target)
-% ============================================================
+% =============================================================
+% Chapter 01 — Design Principles Before Writing Code
+% Rewritten per Part 1 Deep Edit Report
+% =============================================================
 
 \chapter{Design Principles Before Writing Code}
-\label{ch:design-principles-before-writing-code}
-\chapterquote{A well-designed system makes the correct path
-the easiest path.}{Adapted from production engineering practice}
+\label{ch:design-principles}
 
-This chapter defines the architectural contract for the Java agent
-framework built across this part of the book.
-It does not implement anything.
-Its job is to establish the abstractions, boundaries, state model,
-and quality rules that
-Chapters~\ref{ch:core-runtime} through~\ref{ch:protocol-stack}
-must obey --- and to give the reader a stable reference to check
-any later implementation decision against.
+% ------------------------------------------------------------------
+% Chapter Opening — Before you build: the failure modes
+% ------------------------------------------------------------------
 
-Section~\ref{sec:runtime-requirements-recap} translates the
-conceptual agent loop from Volume~1 into concrete runtime
-responsibilities.
-Section~\ref{sec:testability-and-observability} establishes
-testability and observability as first-class design properties.
-Section~\ref{sec:java-concurrency-models} selects and justifies a
-Java~25 concurrency model for the agent loop.
-Section~\ref{sec:dependency-injection-and-modularity} defines the
-full interface catalogue, the core domain model, and the builder
-that assembles a valid runtime from those parts.
-Section~\ref{sec:run-first-call-to-final-state} traces a complete
-run from first call to final state, mapping every state transition
-to the contracts and principles introduced in this chapter.
-Section~\ref{sec:before-you-ship} closes with a verification
-checklist that maps each principle to a concrete, testable
-criterion.
+Before writing a single line of framework code, three failure modes deserve names.
+The first is \textbf{API-centred architecture}: the codebase organises itself around
+LLM request payloads rather than runtime responsibilities, so every change to a model
+provider ripples through unrelated modules.
+The second is \textbf{hidden state}: the agent's position in its own execution lives
+in local variables or prompt text, making it invisible to tests and impossible to replay
+deterministically.
+The third is \textbf{undifferentiated failure}: a single \texttt{catch} block that
+cannot tell a transient model outage from a malformed tool argument — both trigger the
+same retry and produce the same log line.
+These three failure modes are not hypothetical.
+They appear in every production agent system that skipped the design step.
+Part~1 is the antidote.
 
-What this chapter deliberately does not do: it does not build the
-state machine, wire the model client, implement memory backends, or
-add protocol support.
-Each of those belongs to the chapter whose scope owns it.
-
-%% ──────────────────────────────────────────────────────────
-\section{Recap of Runtime Requirements from Volume~1}
+% ------------------------------------------------------------------
+\section{Runtime Requirements}
 \label{sec:runtime-requirements-recap}
+% ------------------------------------------------------------------
 
-\begin{learningbox}
-By the end of this section, you will be able to map the conceptual
-agent loop from Volume~1 to concrete runtime responsibilities,
-identify which responsibilities belong in the core framework, and
-trace each requirement back to the failure mode it prevents.
-\end{learningbox}
+Volume~1 answered the question \emph{what should an agent do}.
+Volume~2 answers the question \emph{who owns what}.
+The distinction matters because ownership is what allows each component to be
+tested, replaced, and reasoned about in isolation.
 
-Volume~1 established that an agent is a stateful software system
-that repeatedly observes input, reasons over context, invokes
-actions, records outcomes, and decides whether to continue.
-The Perceive--Reason--Act--Reflect cycle described there was a
-conceptual model.\marginpar{\footnotesize\itshape See Vol.~1 Ch.~3:
-The Agentic Loop}
-In this part, that cycle becomes a Java runtime with explicit
-contracts, deterministic control flow, and observable execution
-boundaries.
-
-The key shift from Volume~1 to this part is one of
-\emph{responsibility}.
-Volume~1 described what an agent does.
-This part defines who owns what.
-The answer is consistent throughout: the \component{AgentRuntime}
-owns the loop.
-The model client, tool layer, memory system, and protocol adapters
-are dependencies inside that loop --- not alternatives to it.
-
-\subsection*{The failure modes that motivate the requirements}
-\label{subsec:failure-modes-ch1}
-
-Before listing the six requirements, it is worth being concrete
-about what happens when production teams build agent systems
-without them.
-These are not hypothetical risks; they are patterns that recur
-across teams shipping agents for the first time.
-
-\textbf{Hidden state in local variables.}
-The most common structural mistake is to let run state live in
-local variables inside a method that calls the model in a loop.
-The loop works in a demo.
-It breaks in production when a tool call times out, when the
-process restarts mid-run, or when an operator needs to inspect
-what the agent was doing at the moment it produced an unexpected
-result.
-There is no state to inspect because there is no persistent state
---- only a stack frame that no longer exists.
-Requirement~1 (explicit state) directly prevents this failure.
-
-\textbf{The model API as the architecture.}
-When engineers start from a model provider SDK and build outward,
-the codebase organises itself around request payloads and ad hoc
-callback chains.
-Planning logic, tool dispatch, memory loading, and response
-formatting all accumulate inside a single function that calls the
-model.
-The function grows until it cannot be tested without a live API
-key, cannot be debugged without reading several hundred lines of
-interleaved concerns, and cannot be extended without breaking
-something already working.
-Requirements~2 and~3 --- narrow contracts and inward dependency
---- prevent this by separating planning, model invocation, tool
-execution, memory updates, and response emission behind small
-interfaces that can evolve independently.
-
-\textbf{Silent tool errors.}
-When tools fail silently --- returning an empty result, logging a
-warning, and continuing --- the model receives bad evidence on the
-next turn.
-The agent may hallucinate a result or loop indefinitely trying to
-recover from a failure it cannot see.
-Requirement~5 (typed failures) forces every failure to be
-classified and surfaced to the runtime, which can then make a
-policy decision: retry, escalate, or terminate.
-
-\textbf{The ``black box'' run.}
-Without structured execution records, the only evidence of what
-an agent did is whatever it printed to a log file.
-Post-mortem analysis becomes an exercise in reconstructing intent
-from unstructured text.
-Requirement~4 (observable steps) makes every state transition
-produce durable, structured evidence that tracing systems,
-replay tools, and human operators can all consume directly.
-
-\textbf{Tests that require production infrastructure.}
-A framework that cannot be tested without a running model
-provider, a live Redis cluster, and a deployed database is a
-framework that will not be tested thoroughly.
-The test cycle becomes too slow and too brittle to sustain.
-Requirement~6 (testability first) means that every external
-dependency --- model provider, tool executor, memory backend,
-event bus --- is injectable, and the framework ships with
-in-memory fakes for all of them.
-
-The runtime in this part must satisfy six core requirements:
+Each requirement below is the direct inverse of a failure mode observed in
+production agent systems.
 
 \begin{enumerate}
-  \item It must represent execution state explicitly rather than
-        hiding it in local variables or prompt text.
-  \item It must separate planning, model invocation, tool
-        execution, memory updates, and response emission into
-        narrow contracts.
-  \item It must allow infrastructure and domain dependencies to
-        be injected at the edges.
-  \item It must emit enough structured events to make each step
-        replayable and diagnosable.
-  \item It must classify failures into typed categories that the
-        runtime can reason about.
-  \item It must remain easy to test with fake model clients, fake
-        tools, in-memory repositories, and deterministic clocks.
+  \item \textbf{Explicit state} — the run's position in the execution graph is
+        always a named, persisted value.
+  \item \textbf{Narrow contracts} — each component declares a single
+        responsibility and depends only on the abstractions it needs.
+  \item \textbf{Inward dependency} — infrastructure types (Redis keys, HTTP
+        status codes, vendor SDK classes) never appear inside the runtime core.
+  \item \textbf{Structured events} — every observable state transition emits a
+        typed event that downstream subscribers can consume.
+  \item \textbf{Typed failures} — \texttt{ModelFailure}, \texttt{ToolFailure},
+        and \texttt{ValidationFailure} are distinct types that drive distinct
+        recovery decisions.
+  \item \textbf{Testability-first} — the full run loop can be exercised without
+        a live model endpoint or a running persistence layer.
 \end{enumerate}
 
-These requirements are not stylistic preferences.
-They are engineering constraints derived directly from the failure
-modes described above.
-Requirements~1 and~5 drive Chapter~\ref{ch:core-runtime}'s state
-machine design and typed failure handling.
-Requirements~3 and~6 drive the interface boundaries and builder
-pattern in Section~\ref{sec:dependency-injection-and-modularity}.
-Requirements~2 and~4 drive
-Chapter~\ref{ch:memory-tools-orchestration}'s orchestrator, tool,
-and memory contracts, and
-Chapter~\ref{ch:protocol-stack}'s protocol separation.
+\begin{table}[h]
+\centering
+\caption{Requirements mapped to the failure modes they prevent}
+\label{tab:requirements-failure-modes}
+\begin{tabular}{ll}
+\toprule
+\textbf{Requirement} & \textbf{Failure it prevents} \\
+\midrule
+Explicit state     & Hidden mutation — run position inferred from local variables or prompt text \\
+Narrow contracts   & God-object runtime — planning, calling, executing, and emitting couple into one class \\
+Inward dependency  & Infrastructure leakage — Redis types or vendor SDK classes appear in core logic \\
+Structured events  & Silent black box — the only observable output is a final answer or a stack trace \\
+Typed failures     & Undifferentiated catch — \texttt{ModelFailure} and \texttt{ToolFailure} trigger identical retry logic \\
+Testability-first  & Slow test suite — every test requires a live model endpoint and a running Redis instance \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{notebox}
-This chapter defines interfaces before implementations.
-That ordering is deliberate.
-In a framework, implementation must conform to architecture.
-Establishing the contracts first prevents later code from quietly
-redefining the boundaries.
+  The six requirements are not stylistic preferences.
+  They are constraints derived from failure modes in shipping systems.
+  Treat any design decision that violates one of them as a debt item,
+  not an acceptable trade-off.
 \end{notebox}
 
 \begin{takeawaybox}
-Every design decision in
-Chapters~\ref{ch:core-runtime} through~\ref{ch:protocol-stack}
-should be traceable to one of the six runtime requirements.
-If a proposed implementation cannot be justified by one of them,
-treat it as scope creep rather than a feature.
+  Volume~2 is a book about ownership.
+  Before writing a class, ask: which requirement does this class serve,
+  and what failure mode does that requirement prevent?
 \end{takeawaybox}
 
-%% ──────────────────────────────────────────────────────────
-\section{Designing for Testability and Observability}
+% ------------------------------------------------------------------
+\section{Testability and Observability}
 \label{sec:testability-and-observability}
+% ------------------------------------------------------------------
 
-\begin{learningbox}
-By the end of this section, you will be able to explain why
-testability and observability are architectural properties rather
-than after-the-fact additions, describe the three levels of
-observable evidence a production runtime must produce, and
-identify which interfaces enforce each property.
-\end{learningbox}
+Testability and observability are usually treated as engineering virtues added after
+a system is working.
+In agent frameworks they must be structural from day one, because the cost of retrofit
+is disproportionate: adding structured events after the fact requires touching every
+state transition, and adding dependency seams after the fact requires rewriting every
+constructor.
 
-A framework becomes hard to operate long before it becomes hard
-to extend.
-The first serious production failure is rarely ``we could not add
-a feature.''
-It is ``we could not tell what the agent did, why it did it, or
-where it got stuck.''
-For that reason, \term{testability} and \term{observability} must
-be treated as first-class design goals before any runtime loop is
-written.
-
-\subsection{Why observability cannot be bolted on}
-\label{subsec:why-observability-cannot-be-bolted-on}
-
-Consider a common failure pattern.
-A team ships an agent that works well in staging.
-In production, a specific class of user request causes the agent
-to produce a final answer that is factually wrong.
-The team checks the logs and finds a sequence of model responses
-interspersed with tool call outputs.
-They cannot tell whether the wrong answer came from a bad tool
-result, from a model hallucination on top of a correct tool
-result, from a planning step that chose the wrong tool entirely,
-or from a memory retrieval that injected stale context.
-The logs are output, not evidence.
-They record what happened, not why.
-
-The team responds by adding more log statements.
-This is the wrong fix.
-More log statements produce more output without adding causal
-structure.
-The correct fix is to ensure that every state transition produces
-a durable, typed record that directly answers the questions:
-which state was entered, what input did the step receive, what
-output did it produce, how long did it take, and what failure
-category was assigned if it failed.
-Those are not log statements --- they are \term{execution records},
-and they must be designed into the framework from the start.
-
-The same argument applies to testability.
-A test that calls the full runtime with a real model provider is
-not a unit test --- it is an integration test with non-deterministic
-inputs.
-It may pass today because the model produces a sensible response,
-and fail tomorrow because the model's behaviour changed.
-The framework must allow every component to be replaced with a
-controlled fake so that a test can assert precise behavioural
-invariants without depending on external services.
-This requires that every external dependency is injectable from the
-outside, not constructed internally.
-
-\subsection{The six architectural principles}
+\subsection{Architectural Principles}
 \label{subsec:architectural-principles}
 
-The following principles govern every design decision in this
-part.
-Each has a concrete mechanism that enforces it and an engineering
-implication that explains why it matters.
-
-\begin{table}[H]
+\begin{table}[h]
 \centering
-\small
-\caption{Architectural principles for the Java agent framework}
-\label{tab:architectural-principles}
-\begin{tabularx}{\textwidth}{
-  >{  \raggedright\arraybackslash}X
-  >{\raggedright\arraybackslash}X
-  >{\raggedright\arraybackslash}X}
+\caption{Six architectural principles that make a runtime testable and observable}
+\label{tab:arch-principles}
+\begin{tabular}{lll}
 \toprule
-Principle & Mechanism & Engineering implication \\
+\textbf{Principle} & \textbf{Mechanism} & \textbf{What it enables} \\
 \midrule
-Explicit state &
-  Runs, states, and steps are modelled as domain types rather
-  than hidden control flow. &
-  The runtime can validate transitions, resume execution, and
-  support deterministic replay. \\
-\addlinespace
-Narrow contracts &
-  Planning, model access, tools, memory, and event publication
-  are isolated behind small interfaces. &
-  Components can evolve independently and can be replaced with
-  fakes in tests. \\
-\addlinespace
-Inward dependency &
-  The core runtime depends only on abstractions; concrete
-  adapters remain at the edge. &
-  Infrastructure choices such as Redis, HTTP, or a specific
-  model provider do not leak into the runtime core. \\
-\addlinespace
-Observable steps &
-  Every transition produces step records and structured events. &
-  Operators can inspect trajectories instead of inferring
-  behaviour from log output alone. \\
-\addlinespace
-Typed failures &
-  Failures are classified into meaningful categories with policy
-  consequences. &
-  Retry, escalation, and user-visible error handling become
-  deterministic decisions. \\
-\addlinespace
-Testability first &
-  Clock, id generation, repositories, and external dependencies
-  are injectable. &
-  Unit and integration tests run deterministically without
-  production services. \\
+Seam at every boundary    & Interfaces, not classes, in constructor parameters & Fake any dependency in tests \\
+Events, not logs          & Typed event objects on a publish–subscribe bus     & Machine-readable traces \\
+State is data             & Serialisable run state, not thread state           & Deterministic replay \\
+Failure is typed          & Sealed failure hierarchy                           & Per-failure-type retry logic \\
+Side effects at the edge  & I/O only in adapters and repositories              & Pure-function core loop \\
+Builder validates         & Required deps checked at construction, not first use & Fast, clear test failures \\
 \bottomrule
-\end{tabularx}
+\end{tabular}
 \end{table}
 
-These principles are invariants, not guidelines.
-If a later implementation introduces direct framework knowledge
-of a concrete database driver, hides a state transition inside a
-utility method, or catches a failure without classifying it, that
-implementation violates the architectural contract established
-here.
-The right response is to fix the implementation, not to relax
-the principle.
-
 \begin{warningbox}
-A common anti-pattern is to add observability after the runtime
-already works.
-That usually produces verbose logging without causal structure.
-Observable systems do not start with more log lines --- they start
-with better execution models.
-Structuring events around state transitions rather than around log
-statements is the foundation.
+  Retrofit observability is expensive.
+  If you add structured events after the state machine is written, you will touch
+  every \texttt{transition()} call site.
+  Wire the \texttt{EventPublisher} interface into the runtime constructor on day one,
+  even if the first implementation does nothing but discard events.
 \end{warningbox}
 
-\subsection{What to make observable}
-\label{subsec:what-to-make-observable}
-
-The framework should expose observability at three levels.
-
-\begin{enumerate}
-  \item \term{Run-level visibility}: when a run starts, ends,
-        pauses, resumes, times out, or fails.
-  \item \term{Step-level visibility}: which executor ran, what
-        state it handled, how long it took, and what transition
-        it produced.
-  \item \term{Dependency-level visibility}: model latency, tool
-        latency, retrieval volume, and external failure
-        categories.
-\end{enumerate}
-
-That hierarchy prevents the failure common in early agent
-frameworks where everything is either a raw log line or a final
-answer.
-A serious runtime needs a middle layer of step evidence.
-To make this concrete: when a tool call fails, the runtime should
-produce a typed \component{ToolFailure}, a completed step record
-with duration and input fingerprint, and a
-\component{StepCompletedEvent} emitted to subscribers.
-That three-part evidence trail is what enables the replay,
-explainability, and debugging capabilities that Volume~2 Part~3
-covers in depth.\marginpar{\footnotesize\itshape Vol.~2 Part~3:
-Observability \& Replay}
-
 \begin{tipbox}
-If a test cannot assert which state transition occurred, the
-runtime is too implicit.
-If an operator cannot identify which step failed from structured
-events alone, the runtime is under-instrumented.
-Both are design problems --- they cannot be patched cleanly after
-the fact.
+  The cost of a fake dependency is close to zero.
+  A \texttt{FakeModelClient} that returns a fixed response is twenty lines.
+  The benefit is a test suite that runs in milliseconds with no network access.
+  Write the fake before you write the real implementation.
 \end{tipbox}
 
-In practical terms, testability means the framework must make
-side effects replaceable.
-Every external dependency --- model provider, tool executor,
-memory backend, event bus --- must be injectable.
-Observability means every state transition must produce durable
-evidence: a stable \component{RunId}, timestamped step records,
-and structured events capable of feeding tracing, metrics,
-logging, and replay infrastructure.
+\subsection{Three-Level Observability}
+\label{subsec:observability-hierarchy}
+
+The runtime produces observable evidence at three levels.
+At the \emph{run} level, a \texttt{RunSnapshot} records the run's identity, current
+state, and timestamps.
+At the \emph{step} level, a \texttt{RunStep} records which state the agent was in
+when each unit of work began and ended.
+At the \emph{dependency} level, individual collaborators (model client, tool registry,
+memory store) record their inputs and outputs independently of the run loop.
+The three levels compose: a single externally visible failure can be traced from the
+run's terminal state back through the failing step to the dependency call that produced
+the typed failure.
+
+\subsection{Where the Evidence Lives}
+\label{subsec:what-to-make-observable}
+
+The step record lives in \texttt{RunStep}
+(\texttt{runtime/run/RunStep.java})\footnote{\texttt{RunStep.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunStep.java}}
+— each step carries a \texttt{runId}, a \texttt{state} discriminant, a \texttt{startedAt}
+timestamp, a \texttt{completedAt} timestamp, and a \texttt{status} field.
+The durable run state lives in \texttt{RunSnapshot}
+(\texttt{runtime/run/RunSnapshot.java})\footnote{\texttt{RunSnapshot.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunSnapshot.java}}.
+The repository that writes both is \texttt{RunRepository}
+(\texttt{runtime/run/RunRepository.java})\footnote{\texttt{RunRepository.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunRepository.java}}.
+The three-part evidence trail described above is not a design aspiration.
+It is the behaviour of the framework as it exists in the repository.
 
 \begin{takeawaybox}
-Testability and observability shape interface design.
-They are not bolt-on concerns.
-They determine whether the framework can be trusted in production,
-debugged under pressure, and replayed for post-mortem analysis.
-Any interface that hides its side effects or produces no record of
-its execution works against both properties.
+  Observability is not instrumentation added to a finished system.
+  It is the shape of the system's data model.
+  A run that records \texttt{RunStep} entries as it advances is observable by
+  construction — no logging framework required.
 \end{takeawaybox}
 
-%% ──────────────────────────────────────────────────────────
-\section{Java Concurrency Models for Agent Loops}
+% ------------------------------------------------------------------
+\section{Java Concurrency Models}
 \label{sec:java-concurrency-models}
+% ------------------------------------------------------------------
 
-\begin{learningbox}
-By the end of this section, you will be able to choose a
-Java~25 concurrency model appropriate for this framework, justify
-why a sequential per-run state machine is safer than speculative
-async chains, and identify where structured concurrency is the
-right tool for explicit parallelism.
-\end{learningbox}
+An agent runtime faces a concurrency choice early: should individual runs advance
+concurrently, and if so, by what mechanism?
+The options — platform threads, virtual threads, reactive streams, and structured
+concurrency — differ in how they handle blocking calls, how they expose cancellation,
+and how they interact with persistence.
 
-The implementation target for this part is Java~25 LTS.
-That platform provides a stable, modern foundation without
-requiring preview flags.
-The language and runtime features directly relevant to this
-framework are:
-
-\begin{itemize}
-  \item \term{Records}: immutable value types for state snapshots,
-        step outcomes, domain identifiers, and domain events ---
-        eliminating the ceremony of hand-written value classes.
-  \item \term{Sealed interfaces}: closed type hierarchies for
-        failure variants and action types --- allowing the
-        compiler to enforce exhaustive dispatch.
-  \item \term{Pattern matching in switch} (finalised in
-        Java~25): clean, cast-free dispatch over sealed types
-        throughout the runtime loop.
-  \item \term{Virtual threads} (stable since Java~21, default in
-        Java~25): the framework handles thousands of concurrent
-        runs without thread pool tuning or callback-based async
-        code.
-  \item \term{Structured concurrency} (finalised in Java~25):
-        when the framework opts into parallelism --- for example,
-        parallel tool execution --- sub-tasks fail together as a
-        cancellable unit and do not leak threads silently.
-\end{itemize}
-
-\subsection{Why async chains are the wrong model here}
-\label{subsec:why-async-chains-wrong}
-
-The reactive and async programming models are powerful, but they
-are the wrong default for a framework whose primary goal is
-correctness and debuggability.
-Consider what happens when an agent run is modelled as a chain of
-\code{CompletableFuture} stages: planning stage, model call stage,
-tool execution stage, memory update stage.
-Each stage hands off to the next via a callback.
-When a tool call fails halfway through a multi-tool execution, the
-failure propagates through a chain of anonymous lambdas.
-Stack traces become nearly unreadable.
-The state of the run at the moment of failure is implicit ---
-spread across the closure variables captured by each lambda.
-Replay requires reconstructing the chain from scratch rather than
-resuming from a named state.
-Cancellation must be threaded manually through every callback to
-ensure that no continuation runs after a cancel request.
-
-None of these problems are unsolvable, but they all add
-complexity that compounds as the framework grows.
-A sequential state machine does not have these problems by
-default.
-State is explicit and named.
-Failures are caught at a single dispatch point and classified
-before propagating.
-Cancellation is a flag check at the top of the loop.
-Replay is a matter of loading a named state and re-executing the
-executor registered for that state.
-The framework adopts the sequential model and pays for the
-simplicity it earns by keeping async boundaries explicit and
-intentional.
-
-\subsection{Concurrency options and trade-offs}
-\label{subsec:concurrency-options}
-
-Agent systems are inherently concurrent at the system level.
-Multiple runs may execute simultaneously.
-Tool calls may block.
-Model requests may be in flight at the same time.
-Event consumers may subscribe to run progress while execution
-continues.
-But concurrency at the system boundary is not the same as
-uncontrolled concurrency inside a single run.
-
-\begin{sidewaystable}
+\begin{table}[h]
 \centering
-\small
-\caption{Concurrency options for the agent runtime}
-\label{tab:concurrency-options}
-\begin{tabularx}{\textwidth}{
-  >{\raggedright\arraybackslash}X
-  >{\raggedright\arraybackslash}X
-  >{\raggedright\arraybackslash}X
-  >{\raggedright\arraybackslash}X}
+\caption{Concurrency models compared for agent run execution}
+\label{tab:concurrency-models}
+\begin{tabular}{llll}
 \toprule
-Option & Fit for this part & Strengths & Risks \\
+\textbf{Model} & \textbf{Blocking cost} & \textbf{Cancellation} & \textbf{State replay} \\
 \midrule
-Single-threaded event loop per process &
-  Limited &
-  Very easy to reason about. &
-  Throughput collapses when any tool or model call blocks. \\
-\addlinespace
-Thread pool with bounded work queue &
-  Strong baseline &
-  Familiar, predictable, easy to tune, compatible with blocking
-  clients. &
-  Requires careful backpressure and cancellation handling. \\
-\addlinespace
-Virtual threads &
-  Recommended &
-  Near-infinite scalability without async code; ideal for
-  I/O-bound agent workloads. &
-  Requires Java~21+ runtime --- satisfied by the Java~25 target. \\
-\addlinespace
-Structured concurrency &
-  Recommended for parallel steps &
-  Eliminates thread leaks; tasks fail together as a unit via
-  \code{StructuredTaskScope}. &
-  Newer API that requires team familiarity. \\
-\addlinespace
-Reactive pipeline end to end &
-  Conditional &
-  Strong for streaming and high fan-out I/O. &
-  Makes control flow harder to follow; better suited to the
-  distributed infrastructure layers in Volume~2 Part~2. \\
+Platform threads        & High (1 MB stack each)  & Thread.interrupt()  & Possible \\
+Virtual threads (JDK 21)& Low (continuation-based)& Thread.interrupt()  & Possible \\
+Reactive streams        & None                    & Subscription.cancel()& Complex \\
+Structured concurrency  & Low                     & ShutdownOnFailure   & Possible \\
 \bottomrule
-\end{tabularx}
-\end{sidewaystable}
+\end{tabular}
+\end{table}
 
-\subsection{Why the run loop stays sequential}
-\label{subsec:sequential-run-loop}
+\subsubsection{Why Sequential Within a Run}
+\label{subsec:why-sequential}
 
-The framework adopts one governing rule: a single run advances
-through its state machine in a controlled sequence; the scheduler
-decides how many runs may progress concurrently.
-This preserves deterministic reasoning about any individual run
-while still allowing throughput across many runs.
+The framework advances each run \emph{sequentially}: one step at a time, one state
+transition per loop iteration.
+This is a deliberate choice.
+A run that advances two steps concurrently cannot guarantee that the step records
+are written in causal order, which breaks deterministic replay.
+Concurrency happens \emph{across} runs (many runs advancing simultaneously), not
+\emph{within} a run.
+This distinction is what allows the framework to offer cooperative pause and cancel
+semantics: the pause signal is checked at state transition boundaries, where the
+system is always in a consistent, persisted state.
 
-Within a single run, speculative parallelism is avoided until
-state ownership is mature.
-Planning, model calls, tool outcomes, and memory writes all
-mutate run context.
-Concurrent mutations without strict ownership produce race
-conditions that are difficult to reproduce and dangerous to fix
-in production.
+\subsubsection{Framework Orchestration Types}
+\label{subsec:concurrency-boundary-types}
 
-A sequential run loop also makes pause, resume, cancellation, and
-deterministic replay more tractable.
-Each transition has exactly one predecessor and one recorded
-outcome.
-Chapter~\ref{ch:core-runtime} implements this loop and its
-interrupt-handling model directly; the sequential discipline
-established here is what makes that imple
+The framework separates scheduling intent from execution mechanics.
+\texttt{AgentOrchestrator}
+(\texttt{orchestrator/AgentOrchestrator.java})\footnote{\texttt{AgentOrchestrator.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentOrchestrator.java}}
+is the submission surface — it accepts work and returns a handle to the running agent.
+\texttt{AgentRunner}
+(\texttt{orchestrator/AgentRunner.java})\footnote{\texttt{AgentRunner.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentRunner.java}}
+advances individual runs by submitting \texttt{AgentTask} units to a virtual-thread
+executor.
+\texttt{AgentLifecycle}
+(\texttt{orchestrator/AgentLifecycle.java})\footnote{\texttt{AgentLifecycle.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentLifecycle.java}}
+exposes the pause, resume, and cancel controls that Chapter~2 implements.
+
+\begin{takeawaybox}
+  Do not make the concurrency model visible inside the run loop.
+  The loop transitions states; the scheduler decides when to advance.
+  Keeping those concerns separate is what allows the pause-and-resume contract
+  to be honoured without cooperative thread interruption.
+\end{takeawaybox}
+
+% ------------------------------------------------------------------
+\section{Dependency Injection and Modularity}
+\label{sec:dependency-injection-and-modularity}
+% ------------------------------------------------------------------
+
+\subsection{Interface Catalogue}
+\label{subsec:interface-catalogue}
+
+The table below is the canonical contract map for Part~1.
+Every name listed here exists in the framework repository.
+No name not in this table may appear in a code listing or prose description in
+Chapters~1 through~4.
+
+\begin{table}[h]
+\centering
+\caption{Framework interface catalogue — Part 1 reference}
+\label{tab:interface-catalogue}
+\scriptsize
+\begin{tabular}{lllll}
+\toprule
+\textbf{Interface / Type} & \textbf{Responsibility} & \textbf{Layer} & \textbf{Package} & \textbf{Chapter} \\
+\midrule
+\texttt{AgentOrchestrator} & Own a run from submission to termination     & Runtime core  & \texttt{orchestrator}    & Ch~2 \\
+\texttt{AgentRunner}       & Schedule and advance individual runs         & Runtime core  & \texttt{orchestrator}    & Ch~2 \\
+\texttt{AgentLifecycle}    & Expose pause, resume, cancel controls        & Runtime core  & \texttt{orchestrator}    & Ch~2 \\
+\texttt{RunRepository}     & Persist \texttt{Run} aggregate and step history & Runtime core & \texttt{runtime/run}   & Ch~2 \\
+\texttt{RunState}          & Enumerate legal execution states             & Runtime core  & \texttt{runtime/run}     & Ch~1 \\
+\texttt{RunSnapshot}       & Immutable durable projection of a run        & Runtime core  & \texttt{runtime/run}     & Ch~2 \\
+\texttt{ModelClient}       & Provider-neutral language model invocation   & Model layer   & \texttt{modelclient}     & Ch~2 \\
+\texttt{AgentDelegate}     & Delegate work to a sub-agent                 & Orchestration & \texttt{orchestrator}    & Ch~3 \\
+\texttt{AgentTask}         & Represent a unit of scheduled work           & Orchestration & \texttt{orchestrator}    & Ch~2 \\
+\texttt{ToolRegistry}      & Resolve tools by name, expose descriptors    & Tool layer    & \texttt{tooling}         & Ch~3 \\
+\texttt{MemoryStore}       & Load and append memory records               & Memory layer  & \texttt{memory}          & Ch~3 \\
+\texttt{MemoryPolicy}      & Window selection and retention decisions     & Memory layer  & \texttt{memory}          & Ch~3 \\
+\texttt{EventPublisher}    & Structured runtime event emission            & Observability & \texttt{observability}   & Ch~2 \\
+\texttt{PolicyEngine}      & Evaluate security policy before operations   & Security      & \texttt{security}        & Ch~4 \\
+\texttt{SecretResolver}    & Resolve credentials without raw exposure     & Security      & \texttt{security}        & Ch~4 \\
+\texttt{ProtocolAdapter}   & Translate protocol messages to commands      & Protocol edge & \texttt{protocols}       & Ch~4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Core State Model}
+\label{subsec:core-state-model}
+
+The \texttt{RunState} enum is the vocabulary of the entire framework.
+Every component that cares about what an agent is doing — the loop, the repository,
+the event publisher, the interrupt handler — speaks in \texttt{RunState} values.
+The \texttt{PAUSED} state is not a terminal state: it allows the run to be
+resumed from exactly the position at which it was paused, with no work repeated.
+The terminal states (\texttt{COMPLETED}, \texttt{FAILED}, \texttt{CANCELLED},
+\texttt{TIMED\_OUT}) are sink states — once entered, no transition out is legal.
+
+The listing below is the authoritative definition, taken verbatim from the framework:
+
+\begin{lstlisting}[language=Java,caption={RunState enum — \texttt{runtime/run/RunState.java}},label={lst:run-state}]
+// Source: runtime/run/RunState.java
+public enum RunState {
+    QUEUED, PLANNING, MODEL_CALL, TOOL_EXECUTION,
+    MEMORY_UPDATE, RESPONDING, PAUSED,
+    COMPLETED, FAILED, CANCELLED, TIMED_OUT;
+
+    public boolean isTerminal() {
+        return switch (this) {
+            case COMPLETED, FAILED, CANCELLED, TIMED_OUT -> true;
+            default -> false;
+        };
+    }
+
+    public boolean isPaused() {
+        return this == PAUSED;
+    }
+}
+\end{lstlisting}
+
+\subsection{Identity and Request Types}
+\label{subsec:identity-and-request}
+
+\texttt{RunId} represents a globally unique, stable identifier for a single agent run.
+In the framework it lives in \texttt{runtime/run/RunId.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunId.java}}.
+The architectural significance of this boundary is that it prevents raw string identifiers
+from leaking across module boundaries — every component that references a run does so
+through a typed value.
+Chapter~2 implements the full persistence contract; this chapter establishes only the
+vocabulary.
+
+\texttt{RunSnapshot} represents an immutable, serialisable projection of a run's current
+state.
+In the framework it lives in \texttt{runtime/run/RunSnapshot.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunSnapshot.java}}.
+The architectural significance of this boundary is that it separates the mutable
+\texttt{Run} aggregate (used inside the loop) from the read-only projection used by
+monitoring, replay, and external consumers.
+Chapter~2 implements it fully.
+
+\subsection{Typed Failure Hierarchy}
+\label{subsec:typed-failures}
+
+Typed failures are the mechanism by which the framework converts undifferentiated
+exceptions into decisions.
+In the framework the failure types live in \texttt{core/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/core/}}.
+The architectural significance of the sealed hierarchy is that it prevents the pattern
+of a single catch block that retries on everything: each failure type maps to a
+distinct recovery policy.
+
+\begin{table}[h]
+\centering
+\caption{Typed failure hierarchy — what each type represents}
+\label{tab:failure-types}
+\begin{tabular}{ll}
+\toprule
+\textbf{Failure type} & \textbf{Meaning} \\
+\midrule
+\texttt{ModelFailure}      & The language model returned an error or produced unparseable output \\
+\texttt{ToolFailure}       & A tool execution raised an exception or returned a failure result \\
+\texttt{ValidationFailure} & An input or intermediate value failed a precondition check \\
+\texttt{InternalFailure}   & An unexpected exception inside the framework itself \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Step Execution Contract}
+\label{subsec:step-execution-contract}
+
+The step execution contract defines the boundary between the state machine loop and
+the handlers that do domain work.
+In the framework, the dispatch logic lives inside
+\texttt{DefaultAgentOrchestrator}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/DefaultAgentOrchestrator.java}},
+which owns the mapping from \texttt{RunState} to the handler that advances that state.
+The architectural significance of this boundary is that it allows each handler to be
+tested in isolation without constructing the full runtime.
+Chapter~2 implements it fully.
+
+\subsection{Model and Orchestration Contracts}
+\label{subsec:model-orchestration-contracts}
+
+\texttt{ModelClient} represents a provider-neutral interface for language model
+invocation.
+In the framework it lives in \texttt{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/}}.
+The architectural significance of this boundary is that it prevents OpenAI types,
+Anthropic types, or any other provider SDK from appearing inside the runtime loop —
+the loop speaks only \texttt{ModelClient}.
+The orchestration decision types live in
+\texttt{orchestrator/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/}}.
+Chapter~2 implements both fully.
+
+\subsection{Memory and Tool Contracts}
+\label{subsec:memory-tool-contracts}
+
+\texttt{MemoryStore} represents a narrow interface for loading and appending memory
+records.
+In the framework it lives in \texttt{memory/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}}.
+\texttt{MemoryPolicy} governs which records are selected for the model's context window
+and when records are retired.
+Both live in \texttt{memory/}.
+\texttt{ToolRegistry} resolves tools by name and exposes their descriptors to the
+orchestrator.
+In the framework it lives in
+\texttt{tooling/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/}}.
+Chapter~3 implements all three fully.
+
+\subsection{Policy, Secrets, and Events}
+\label{subsec:policy-secrets-events}
+
+\texttt{PolicyEngine} evaluates whether a proposed operation is permitted for the
+current tenant and security context.
+In the framework it lives in
+\texttt{security/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/security/}}.
+\texttt{SecretResolver} resolves credentials without exposing raw secret material to
+the runtime loop.
+It also lives in \texttt{security/}.
+\texttt{EventPublisher} emits structured events for every state transition.
+In the framework it lives in
+\texttt{observability/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/observability/}}.
+Chapter~4 implements all three fully; this chapter establishes only the contracts.
+
+\subsection{Run Walkthrough}
+\label{subsec:run-walkthrough}
+
+A single run begins when a caller submits an \texttt{AgentTask} to the
+\texttt{AgentOrchestrator}.
+The orchestrator creates a \texttt{Run} aggregate in state \texttt{QUEUED} and
+persists it through \texttt{RunRepository}.
+The \texttt{AgentRunner} picks up the task and transitions the run to
+\texttt{PLANNING}, where the orchestrator assembles the initial context from
+\texttt{MemoryStore}.
+From \texttt{PLANNING} the run transitions to \texttt{MODEL\_CALL}, where
+\texttt{ModelClient} is invoked.
+If the model returns a tool call the run transitions to \texttt{TOOL\_EXECUTION};
+if it returns a final answer it transitions to \texttt{RESPONDING}.
+At each transition \texttt{RunRepository} writes a \texttt{RunStep} record and
+\texttt{EventPublisher} emits a typed event.
+If a \texttt{ToolFailure} is raised during \texttt{TOOL\_EXECUTION}, the run
+transitions to \texttt{FAILED} and the failure type is preserved in the
+\texttt{RunSnapshot} for downstream consumers to inspect.
+
+\subsection{Builder}
+\label{subsec:builder}
+
+The builder is the wiring point for the entire runtime.
+Its job is to enforce the distinction between \emph{required} dependencies (those
+whose absence would cause an immediate \texttt{NullPointerException} in the first
+request) and \emph{optional} dependencies (those for which a safe default exists).
+The framework provides a builder in
+\texttt{runtime/builder/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/builder/}}.
+The principle is that the build should fail loudly at construction time rather than
+silently at the first request — a failed build is a five-second problem; a failed
+first request at 2~AM is a thirty-minute problem.
+
+\begin{tipbox}
+  Provide fake implementations of every required dependency in tests.
+  A \texttt{FakeModelClient}, an \texttt{InMemoryRunRepository}, and a
+  no-op \texttt{EventPublisher} are all you need to construct a fully wired
+  runtime that runs without any external infrastructure.
+  The builder's validation guards will catch any missing dependency immediately.
+\end{tipbox}
+
+\begin{takeawaybox}
+  The builder is not a convenience.
+  It is the enforcement point for the sixth requirement: testability-first.
+  A builder that fails loudly on missing dependencies makes it impossible to
+  write a test that silently skips the component under test.
+\end{takeawaybox}
+
+% ------------------------------------------------------------------
+\section{Chapter Summary}
+\label{sec:chapter-1-summary}
+% ------------------------------------------------------------------
+
+This chapter established six invariants that every design decision in Part~1 must
+satisfy: explicit state, narrow contracts, inward dependency, structured events,
+typed failures, and testability-first.
+These invariants are not stylistic preferences — they are the inverse of six
+documented failure modes.
+The interface catalogue in Section~\ref{subsec:interface-catalogue} and the
+\texttt{RunState} enum in Listing~\ref{lst:run-state} are the only two deliverables;
+everything else in this chapter is motivation.
+
+Chapter~2 implements the state machine loop and executor dispatch using the types
+defined here, with all listings drawn from the framework repository.
+Chapter~3 explains the memory tier architecture and the orchestration decision
+pipeline, using framework packages \texttt{memory} and \texttt{orchestrator} as its
+primary reference.
+Chapter~4 closes Part~1 by showing how the protocol edge sits outside the runtime
+core, with adapters that translate but never own domain decisions.
+
+\begin{takeawaybox}
+  Own your contracts before you write your implementations.
+  The six requirements, the interface catalogue, and the state vocabulary are
+  sufficient to begin writing tests.
+  Tests that compile against interfaces and compile against
+  \texttt{RunState} are tests that will survive every refactoring that follows.
+\end{takeawaybox}
