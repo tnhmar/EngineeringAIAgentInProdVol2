@@ -89,20 +89,20 @@ Testability-first  & Slow test suite — every test requires a live model endpoi
 \begin{tikzpicture}[
   layer/.style={draw, rounded corners=4pt, minimum width=9cm,
                 minimum height=0.72cm, text centered, font=\small\ttfamily},
-  proto/.style={layer,  fill=gray!15},
-  sec/.style={layer,    fill=orange!18},
-  obs/.style={layer,    fill=yellow!22},
-  domain/.style={layer, fill=teal!18},
-  orch/.style={layer,   fill=blue!15},
-  core/.style={layer,   fill=blue!30},
+  proto/.style={layer,   fill=gray!15},
+  sec/.style={layer,     fill=orange!18},
+  obs/.style={layer,     fill=yellow!22},
+  domlayer/.style={layer, fill=teal!18},
+  orch/.style={layer,    fill=blue!15},
+  core/.style={layer,    fill=blue!30},
   arr/.style={->, thick, >=stealth}
 ]
-  \node[proto]  (proto)  at (0, 5.4) {protocols — HTTP / MCP / A2A adapters};
-  \node[sec]    (sec)    at (0, 4.4) {security — PolicyEngine, SecretResolver};
-  \node[obs]    (obs)    at (0, 3.4) {observability — EventPublisher, exporters};
-  \node[domain] (domain) at (0, 2.4) {tooling + memory — ToolRegistry, MemoryStore};
-  \node[orch]   (orchn)  at (0, 1.4) {orchestrator — AgentOrchestrator, AgentRunner};
-  \node[core]   (coren)  at (0, 0.4) {runtime/run — Run, RunState, RunRepository};
+  \node[proto]    (proto)  at (0, 5.4) {protocols — HTTP / MCP / A2A adapters};
+  \node[sec]      (sec)    at (0, 4.4) {security — PolicyEngine, SecretResolver};
+  \node[obs]      (obs)    at (0, 3.4) {observability — EventPublisher, exporters};
+  \node[domlayer] (domain) at (0, 2.4) {tooling + memory — ToolRegistry, MemoryStore};
+  \node[orch]     (orchn)  at (0, 1.4) {orchestrator — AgentOrchestrator, AgentRunner};
+  \node[core]     (coren)  at (0, 0.4) {runtime/run — Run, RunState, RunRepository};
 
   \draw[arr] (proto.south)  -- (sec.north);
   \draw[arr] (sec.south)    -- (obs.north);
