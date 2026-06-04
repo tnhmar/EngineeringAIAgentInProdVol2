@@ -159,7 +159,9 @@
 \usepackage{listings}
 \lstset{
   backgroundcolor   = \color{CodeBg},
-  basicstyle        = \ttfamily\fontsize{9.5}{11}\selectfont,
+  %% 9pt avoids the "Font shape OML/cmm/m/it not available at 9.5" warning;
+  %% OML/cmm and OMS/cmsy only ship at integer sizes in TeX Live.
+  basicstyle        = \ttfamily\fontsize{9}{11}\selectfont,
   keywordstyle      = \color{CodeKeyword}\bfseries,
   stringstyle       = \color{CodeString}\itshape,
   commentstyle      = \color{CodeComment}\itshape,
@@ -292,7 +294,10 @@
   left=8pt, right=8pt, top=6pt, bottom=6pt,
   boxrule=0.6pt, width=\linewidth
 }
-\newtcolorbox{takeawaybox}[1]{
+%% takeawaybox: optional title argument — default is "Key Takeaway".
+%% \begin{takeawaybox}           → title "Key Takeaway"
+%% \begin{takeawaybox}[My Title] → title "My Title"
+\newtcolorbox{takeawaybox}[1][Key Takeaway]{
   colback=TakeawayBg, colframe=TakeawayBorder,
   before skip=12pt, fonttitle=\sffamily\bfseries\small,
   title={#1}, breakable, lines before break=3,

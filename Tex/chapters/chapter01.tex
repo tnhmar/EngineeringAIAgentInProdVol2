@@ -50,7 +50,7 @@ production agent systems.
         a live model endpoint or a running persistence layer.
 \end{enumerate}
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering
 \caption{Requirements mapped to the failure modes they prevent}
 \label{tab:requirements-failure-modes}
@@ -141,7 +141,7 @@ constructor.
 \subsection{Architectural Principles}
 \label{subsec:architectural-principles}
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering
 \caption{Six architectural principles that make a runtime testable and observable}
 \label{tab:arch-principles}
@@ -218,7 +218,7 @@ The options — platform threads, virtual threads, reactive streams, and structu
 concurrency — differ in how they handle blocking calls, how they expose cancellation,
 and how they interact with persistence.
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering
 \caption{Concurrency models compared for agent run execution}
 \label{tab:concurrency-models}
@@ -283,7 +283,7 @@ Every name listed here exists in the framework repository.
 No name not in this table may appear in a code listing or prose description in
 Chapters~1 through~4.
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering
 \caption{Framework interface catalogue — Part 1 reference}
 \label{tab:interface-catalogue}
@@ -323,205 +323,4 @@ resumed from exactly the position at which it was paused, with no work repeated.
 The terminal states (\texttt{COMPLETED}, \texttt{FAILED}, \texttt{CANCELLED},
 \texttt{TIMED\_OUT}) are sink states — once entered, no transition out is legal.
 
-The listing below is the authoritative definition, taken verbatim from the framework:
-
-\begin{lstlisting}[language=Java,caption={RunState enum — \texttt{runtime/run/RunState.java}},label={lst:run-state}]
-// Source: runtime/run/RunState.java
-public enum RunState {
-    QUEUED, PLANNING, MODEL_CALL, TOOL_EXECUTION,
-    MEMORY_UPDATE, RESPONDING, PAUSED,
-    COMPLETED, FAILED, CANCELLED, TIMED_OUT;
-
-    public boolean isTerminal() {
-        return switch (this) {
-            case COMPLETED, FAILED, CANCELLED, TIMED_OUT -> true;
-            default -> false;
-        };
-    }
-
-    public boolean isPaused() {
-        return this == PAUSED;
-    }
-}
-\end{lstlisting}
-
-\subsection{Identity and Request Types}
-\label{subsec:identity-and-request}
-
-\texttt{RunId} represents a globally unique, stable identifier for a single agent run.
-In the framework it lives in \path{runtime/run/RunId.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunId.java}}.
-The architectural significance of this boundary is that it prevents raw string identifiers
-from leaking across module boundaries — every component that references a run does so
-through a typed value.
-Chapter~2 implements the full persistence contract; this chapter establishes only the
-vocabulary.
-
-\texttt{RunSnapshot} represents an immutable, serialisable projection of a run's current
-state.
-In the framework it lives in \path{runtime/run/RunSnapshot.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunSnapshot.java}}.
-The architectural significance of this boundary is that it separates the mutable
-\texttt{Run} aggregate (used inside the loop) from the read-only projection used by
-monitoring, replay, and external consumers.
-Chapter~2 implements it fully.
-
-\subsection{Typed Failure Hierarchy}
-\label{subsec:typed-failures}
-
-Typed failures are the mechanism by which the framework converts undifferentiated
-exceptions into decisions.
-In the framework the failure types live in \path{core/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/core/}}.
-The architectural significance of the sealed hierarchy is that it prevents the pattern
-of a single catch block that retries on everything: each failure type maps to a
-distinct recovery policy.
-
-\begin{table}[h]
-\centering
-\caption{Typed failure hierarchy — what each type represents}
-\label{tab:failure-types}
-\begin{tabular}{ll}
-\toprule
-\textbf{Failure type} & \textbf{Meaning} \\
-\midrule
-\texttt{ModelFailure}      & The language model returned an error or produced unparseable output \\
-\texttt{ToolFailure}       & A tool execution raised an exception or returned a failure result \\
-\texttt{ValidationFailure} & An input or intermediate value failed a precondition check \\
-\texttt{InternalFailure}   & An unexpected exception inside the framework itself \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Step Execution Contract}
-\label{subsec:step-execution-contract}
-
-The step execution contract defines the boundary between the state machine loop and
-the handlers that do domain work.
-In the framework, the dispatch logic lives inside
-\texttt{DefaultAgentOrchestrator}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/DefaultAgentOrchestrator.java}},
-which owns the mapping from \texttt{RunState} to the handler that advances that state.
-The architectural significance of this boundary is that it allows each handler to be
-tested in isolation without constructing the full runtime.
-Chapter~2 implements it fully.
-
-\subsection{Model and Orchestration Contracts}
-\label{subsec:model-orchestration-contracts}
-
-\texttt{ModelClient} represents a provider-neutral interface for language model
-invocation.
-In the framework it lives in \path{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/}}.
-The architectural significance of this boundary is that it prevents OpenAI types,
-Anthropic types, or any other provider SDK from appearing inside the runtime loop —
-the loop speaks only \texttt{ModelClient}.
-The orchestration decision types live in
-\path{orchestrator/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/}}.
-Chapter~2 implements both fully.
-
-\subsection{Memory and Tool Contracts}
-\label{subsec:memory-tool-contracts}
-
-\texttt{MemoryStore} represents a narrow interface for loading and appending memory
-records.
-In the framework it lives in \path{memory/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}}.
-\texttt{MemoryPolicy} governs which records are selected for the model's context window
-and when records are retired.
-Both live in \path{memory/}.
-\texttt{ToolRegistry} resolves tools by name and exposes their descriptors to the
-orchestrator.
-In the framework it lives in
-\path{tooling/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/}}.
-Chapter~3 implements all three fully.
-
-\subsection{Policy, Secrets, and Events}
-\label{subsec:policy-secrets-events}
-
-\texttt{PolicyEngine} evaluates whether a proposed operation is permitted for the
-current tenant and security context.
-In the framework it lives in
-\path{security/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/security/}}.
-\texttt{SecretResolver} resolves credentials without exposing raw secret material to
-the runtime loop.
-It also lives in \path{security/}.
-\texttt{EventPublisher} emits structured events for every state transition.
-In the framework it lives in
-\path{observability/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/observability/}}.
-Chapter~4 implements all three fully; this chapter establishes only the contracts.
-
-\subsection{Run Walkthrough}
-\label{subsec:run-walkthrough}
-
-A single run begins when a caller submits an \texttt{AgentTask} to the
-\texttt{AgentOrchestrator}.
-The orchestrator creates a \texttt{Run} aggregate in state \texttt{QUEUED} and
-persists it through \texttt{RunRepository}.
-The \texttt{AgentRunner} picks up the task and transitions the run to
-\texttt{PLANNING}, where the orchestrator assembles the initial context from
-\texttt{MemoryStore}.
-From \texttt{PLANNING} the run transitions to \texttt{MODEL\_CALL}, where
-\texttt{ModelClient} is invoked.
-If the model returns a tool call the run transitions to \texttt{TOOL\_EXECUTION};
-if it returns a final answer it transitions to \texttt{RESPONDING}.
-At each transition \texttt{RunRepository} writes a \texttt{RunStep} record and
-\texttt{EventPublisher} emits a typed event.
-If a \texttt{ToolFailure} is raised during \texttt{TOOL\_EXECUTION}, the run
-transitions to \texttt{FAILED} and the failure type is preserved in the
-\texttt{RunSnapshot} for downstream consumers to inspect.
-
-\subsection{Builder}
-\label{subsec:builder}
-
-The builder is the wiring point for the entire runtime.
-Its job is to enforce the distinction between \emph{required} dependencies (those
-whose absence would cause an immediate \texttt{NullPointerException} in the first
-request) and \emph{optional} dependencies (those for which a safe default exists).
-The framework provides a builder in
-\path{runtime/builder/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/builder/}}.
-The principle is that the build should fail loudly at construction time rather than
-silently at the first request — a failed build is a five-second problem; a failed
-first request at 2~AM is a thirty-minute problem.
-
-\begin{tipbox}
-  Provide fake implementations of every required dependency in tests.
-  A \texttt{FakeModelClient}, an \texttt{InMemoryRunRepository}, and a
-  no-op \texttt{EventPublisher} are all you need to construct a fully wired
-  runtime that runs without any external infrastructure.
-  The builder's validation guards will catch any missing dependency immediately.
-\end{tipbox}
-
-\begin{takeawaybox}
-  The builder is not a convenience.
-  It is the enforcement point for the sixth requirement: testability-first.
-  A builder that fails loudly on missing dependencies makes it impossible to
-  write a test that silently skips the component under test.
-\end{takeawaybox}
-
-% ------------------------------------------------------------------
-\section{Chapter Summary}
-\label{sec:chapter-1-summary}
-% ------------------------------------------------------------------
-
-This chapter established six invariants that every design decision in Part~1 must
-satisfy: explicit state, narrow contracts, inward dependency, structured events,
-typed failures, and testability-first.
-These invariants are not stylistic preferences — they are the inverse of six
-documented failure modes.
-The interface catalogue in Section~\ref{subsec:interface-catalogue} and the
-\texttt{RunState} enum in Listing~\ref{lst:run-state} are the only two deliverables;
-everything else in this chapter is motivation.
-
-Figure~\ref{fig:layer-architecture} shows how the six invariants map to the six
-framework layers and the direction of allowed dependencies between them.
-
-Chapter~2 implements the state machine loop and executor dispatch using the types
-defined here, with all listings drawn from the framework repository.
-Chapter~3 explains the memory tier architecture and the orchestration decision
-pipeline, using framework packages \texttt{memory} and \texttt{orchestrator} as its
-primary reference.
-Chapter~4 closes Part~1 by showing how the protocol edge sits outside the runtime
-core, with adapters that translate but never own domain decisions.
-
-\begin{takeawaybox}
-  Own your contracts before you write your implementations.
-  The six requirements, the interface catalogue, and the state vocabulary are
-  sufficient to begin writing tests.
-  Tests that compile against interfaces and compile against
-  \texttt{RunState} are tests that will survive every refactoring that follows.
-\end{takeawaybox}
+The listing below is the authoritative definition, taken ver
