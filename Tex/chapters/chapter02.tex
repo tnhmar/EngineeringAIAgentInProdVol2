@@ -90,7 +90,7 @@ private boolean isLegalTransition(RunState from, RunState to) {
 % ------------------------------------------------------------------
 % Figure 2.1 — Complete Run state machine
 % ------------------------------------------------------------------
-\begin{figure}[h]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
   every node/.style={font=\small\ttfamily},
@@ -362,7 +362,7 @@ replay and clean resume semantics.
 
 \begin{lstlisting}[language=Java,
   caption={\texttt{AgentLifecycle} --- lifecycle control interface
-           (\texttt{orchestrator/AgentLifecycle.java})},
+           (\path{orchestrator/AgentLifecycle.java})},
   label={lst:agent-lifecycle}]
 // Source: orchestrator/AgentLifecycle.java
 // V-ISP-01: clients that only need lifecycle control depend on this interface.
@@ -419,7 +419,7 @@ translates between the framework's vocabulary and the provider's API in the
 adapter layer.
 
 The \texttt{ModelClient} interface lives in
-\texttt{modelclient/}%
+\path{modelclient/}%
 \footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/ModelClient.java}}.
 The interface declares a single method: the caller passes a \texttt{ModelPrompt}
 and a \texttt{ModelRequestContext} in the framework's vocabulary and receives a

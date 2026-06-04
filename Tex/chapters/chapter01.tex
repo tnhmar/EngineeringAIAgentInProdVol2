@@ -84,7 +84,7 @@ Testability-first  & Slow test suite — every test requires a live model endpoi
 % ------------------------------------------------------------------
 % Figure 1.1 — Framework layer architecture and dependency direction
 % ------------------------------------------------------------------
-\begin{figure}[h]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
   layer/.style={draw, rounded corners=4pt, minimum width=9cm,
@@ -191,16 +191,11 @@ the typed failure.
 \subsection{Where the Evidence Lives}
 \label{subsec:what-to-make-observable}
 
-The step record lives in \texttt{RunStep}
-(\texttt{runtime/run/RunStep.java})\footnote{\texttt{RunStep.java}:
-\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunStep.java}}
-— each step carries a \texttt{runId}, a \texttt{state} discriminant, a \texttt{startedAt}
-timestamp, a \texttt{completedAt} timestamp, and a \texttt{status} field.
-The durable run state lives in \texttt{RunSnapshot}
-(\texttt{runtime/run/RunSnapshot.java})\footnote{\texttt{RunSnapshot.java}:
+The step record lives in \texttt{RunStep} (\path{runtime/run/RunStep.java})\footnote{\texttt{RunStep.java}:
+\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunStep.java}}.
+The durable run state lives in \texttt{RunSnapshot} (\path{runtime/run/RunSnapshot.java})\footnote{\texttt{RunSnapshot.java}:
 \url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunSnapshot.java}}.
-The repository that writes both is \texttt{RunRepository}
-(\texttt{runtime/run/RunRepository.java})\footnote{\texttt{RunRepository.java}:
+The repository that writes both is \texttt{RunRepository} (\path{runtime/run/RunRepository.java})\footnote{\texttt{RunRepository.java}:
 \url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunRepository.java}}.
 The three-part evidence trail described above is not a design aspiration.
 It is the behaviour of the framework as it exists in the repository.
@@ -257,17 +252,14 @@ system is always in a consistent, persisted state.
 \label{subsec:concurrency-boundary-types}
 
 The framework separates scheduling intent from execution mechanics.
-\texttt{AgentOrchestrator}
-(\texttt{orchestrator/AgentOrchestrator.java})\footnote{\texttt{AgentOrchestrator.java}:
+\texttt{AgentOrchestrator} (\path{orchestrator/AgentOrchestrator.java})\footnote{\texttt{AgentOrchestrator.java}:
 \url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentOrchestrator.java}}
 is the submission surface — it accepts work and returns a handle to the running agent.
-\texttt{AgentRunner}
-(\texttt{orchestrator/AgentRunner.java})\footnote{\texttt{AgentRunner.java}:
+\texttt{AgentRunner} (\path{orchestrator/AgentRunner.java})\footnote{\texttt{AgentRunner.java}:
 \url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentRunner.java}}
 advances individual runs by submitting \texttt{AgentTask} units to a virtual-thread
 executor.
-\texttt{AgentLifecycle}
-(\texttt{orchestrator/AgentLifecycle.java})\footnote{\texttt{AgentLifecycle.java}:
+\texttt{AgentLifecycle} (\path{orchestrator/AgentLifecycle.java})\footnote{\texttt{AgentLifecycle.java}:
 \url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentLifecycle.java}}
 exposes the pause, resume, and cancel controls that Chapter~2 implements.
 
@@ -357,7 +349,7 @@ public enum RunState {
 \label{subsec:identity-and-request}
 
 \texttt{RunId} represents a globally unique, stable identifier for a single agent run.
-In the framework it lives in \texttt{runtime/run/RunId.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunId.java}}.
+In the framework it lives in \path{runtime/run/RunId.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunId.java}}.
 The architectural significance of this boundary is that it prevents raw string identifiers
 from leaking across module boundaries — every component that references a run does so
 through a typed value.
@@ -366,7 +358,7 @@ vocabulary.
 
 \texttt{RunSnapshot} represents an immutable, serialisable projection of a run's current
 state.
-In the framework it lives in \texttt{runtime/run/RunSnapshot.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunSnapshot.java}}.
+In the framework it lives in \path{runtime/run/RunSnapshot.java}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/run/RunSnapshot.java}}.
 The architectural significance of this boundary is that it separates the mutable
 \texttt{Run} aggregate (used inside the loop) from the read-only projection used by
 monitoring, replay, and external consumers.
@@ -377,7 +369,7 @@ Chapter~2 implements it fully.
 
 Typed failures are the mechanism by which the framework converts undifferentiated
 exceptions into decisions.
-In the framework the failure types live in \texttt{core/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/core/}}.
+In the framework the failure types live in \path{core/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/core/}}.
 The architectural significance of the sealed hierarchy is that it prevents the pattern
 of a single catch block that retries on everything: each failure type maps to a
 distinct recovery policy.
@@ -415,12 +407,12 @@ Chapter~2 implements it fully.
 
 \texttt{ModelClient} represents a provider-neutral interface for language model
 invocation.
-In the framework it lives in \texttt{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/}}.
+In the framework it lives in \path{modelclient/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/}}.
 The architectural significance of this boundary is that it prevents OpenAI types,
 Anthropic types, or any other provider SDK from appearing inside the runtime loop —
 the loop speaks only \texttt{ModelClient}.
 The orchestration decision types live in
-\texttt{orchestrator/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/}}.
+\path{orchestrator/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/}}.
 Chapter~2 implements both fully.
 
 \subsection{Memory and Tool Contracts}
@@ -428,14 +420,14 @@ Chapter~2 implements both fully.
 
 \texttt{MemoryStore} represents a narrow interface for loading and appending memory
 records.
-In the framework it lives in \texttt{memory/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}}.
+In the framework it lives in \path{memory/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}}.
 \texttt{MemoryPolicy} governs which records are selected for the model's context window
 and when records are retired.
-Both live in \texttt{memory/}.
+Both live in \path{memory/}.
 \texttt{ToolRegistry} resolves tools by name and exposes their descriptors to the
 orchestrator.
 In the framework it lives in
-\texttt{tooling/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/}}.
+\path{tooling/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/}}.
 Chapter~3 implements all three fully.
 
 \subsection{Policy, Secrets, and Events}
@@ -444,13 +436,13 @@ Chapter~3 implements all three fully.
 \texttt{PolicyEngine} evaluates whether a proposed operation is permitted for the
 current tenant and security context.
 In the framework it lives in
-\texttt{security/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/security/}}.
+\path{security/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/security/}}.
 \texttt{SecretResolver} resolves credentials without exposing raw secret material to
 the runtime loop.
-It also lives in \texttt{security/}.
+It also lives in \path{security/}.
 \texttt{EventPublisher} emits structured events for every state transition.
 In the framework it lives in
-\texttt{observability/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/observability/}}.
+\path{observability/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/observability/}}.
 Chapter~4 implements all three fully; this chapter establishes only the contracts.
 
 \subsection{Run Walkthrough}
@@ -481,7 +473,7 @@ Its job is to enforce the distinction between \emph{required} dependencies (thos
 whose absence would cause an immediate \texttt{NullPointerException} in the first
 request) and \emph{optional} dependencies (those for which a safe default exists).
 The framework provides a builder in
-\texttt{runtime/builder/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/builder/}}.
+\path{runtime/builder/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/runtime/builder/}}.
 The principle is that the build should fail loudly at construction time rather than
 silently at the first request — a failed build is a five-second problem; a failed
 first request at 2~AM is a thirty-minute problem.
