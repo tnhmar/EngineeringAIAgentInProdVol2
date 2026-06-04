@@ -116,7 +116,7 @@ Procedural & Reusable task patterns & Yes & \texttt{memory/procedural} \\
 \end{figure}
 
 The runtime does not choose a memory backend.
-It calls \texttt{MemoryStore}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}},
+It calls \texttt{MemoryStore}\footnote{\path{memory/}},
 which is a narrow interface.
 The backend — in-memory, Redis, PostgreSQL, or a vector store — is wired at
 construction time through the builder.
@@ -124,7 +124,7 @@ This is the inward-dependency invariant applied to memory: the runtime core
 never imports a Redis type, a JDBC driver class, or a vector store SDK.
 
 For working memory, the framework provides
-\texttt{WorkingMemoryStore}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/working/WorkingMemoryStore.java}}
+\texttt{WorkingMemoryStore}\footnote{\path{memory/working/WorkingMemoryStore.java}}
 — a bounded, run-scoped scratchpad that lives in-process for the duration of a
 single run.
 It exposes only the operations the runtime needs: put a keyed value, get by key,
@@ -170,7 +170,7 @@ and are the primary knowledge substrate for agents that reason over time.
 
 Episodic memory records what the agent did, not what it knows.  Each entry
 is a time-stamped summary of an execution episode associated with an agent
-identifier.  \texttt{EpisodicStore}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/episodic/EpisodicStore.java}}
+identifier.  \texttt{EpisodicStore}\footnote{\path{memory/episodic/EpisodicStore.java}}
 exposes two retrieval paths: recall by agent and recall of the $n$ most
 recent episodes regardless of agent.
 
@@ -272,7 +272,7 @@ argument in the builder.  No runtime code changes.
 
 For durable memory tiers the framework differentiates between tiers at the type level
 through distinct interfaces and package structures under
-\texttt{memory/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/memory/}}.
+\texttt{memory/}\footnote{\path{memory/}}.
 A \texttt{MemoryPolicy} governs which records are selected for the model's context
 window and when records are retired.
 The orchestrator calls \texttt{MemoryPolicy} to decide what to pass to the model;
@@ -302,7 +302,7 @@ Tool execution happens only when the model selects a tool and the security polic
 permits the call.
 
 The \texttt{ToolRegistry} class lives in
-\texttt{tooling/registry/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/tooling/registry/ToolRegistry.java}}.
+\texttt{tooling/registry/}\footnote{\path{tooling/registry/ToolRegistry.java}}.
 It maintains a concurrent map of \texttt{ToolDefinition} entries keyed by tool
 identifier, and exposes register, find, list-by-category, and deregister operations.
 
@@ -338,7 +338,7 @@ Discovery and execution are two distinct operations on two distinct types.
 \label{subsec:parallel-tools}
 
 When the model requests multiple tool calls in a single response, the framework
-dispatches them through \texttt{AgentDelegate}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentDelegate.java}}.
+dispatches them through \texttt{AgentDelegate}\footnote{\path{orchestrator/AgentDelegate.java}}.
 The delegation interface is the same whether the peer agent is in-process or remote,
 which means the orchestrator does not change its dispatch logic based on topology.
 The same \texttt{AgentDelegate} abstraction is also used for sub-agent delegation
@@ -356,7 +356,7 @@ in the registry is a \texttt{ToolDefinition}, regardless of where the execution 
 The adapter wires the transport; the registry and the orchestrator use the same
 interface in either case.
 The adapter lives in
-\texttt{protocols/}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/protocols/}}.
+\texttt{protocols/}\footnote{\path{protocols/}}.
 
 % ------------------------------------------------------------------
 \section{Orchestration}
@@ -395,7 +395,8 @@ It is a set of composable stages:
 \centering
 \begin{tikzpicture}[
   box/.style={draw, rounded corners=4pt, minimum width=3.2cm,
-              minimum height=0.75cm, text centered, font=\small\ttfamily,
+              minimum height=0.75cm, text centered, align=center,
+              font=\small\ttfamily,
               fill=teal!12},
   arr/.style={->, >=stealth, thick},
   lbl/.style={font=\fontsize{7}{8}\selectfont\itshape, midway, above}
@@ -430,7 +431,7 @@ It is a set of composable stages:
 \end{figure}
 
 The decision dispatch section of
-\texttt{DefaultAgentOrchestrator}\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/DefaultAgentOrchestrator.java}}
+\texttt{DefaultAgentOrchestrator}\footnote{\path{orchestrator/DefaultAgentOrchestrator.java}}
 routes the current \texttt{AgentTask} through the pipeline stages in sequence.
 The excerpt below shows the pipeline invocation structure:
 

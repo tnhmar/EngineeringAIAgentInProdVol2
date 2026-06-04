@@ -198,7 +198,7 @@ exception that escapes the run boundary.
 Each state must map to exactly one executor.
 In the framework that mapping is maintained inside
 \texttt{DefaultAgentOrchestrator}%
-\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/DefaultAgentOrchestrator.java}},
+\footnote{\path{orchestrator/DefaultAgentOrchestrator.java}},
 which owns the dispatch logic and validates state coverage at construction time.
 
 The core loop is a state-dispatch entry point: it reads the current \texttt{RunState},
@@ -250,11 +250,11 @@ This separation is what allows the admission policy to change — from a fixed
 concurrency limit to a priority queue, for example — without touching the loop.
 
 \texttt{AgentTask}%
-\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentTask.java}}
+\footnote{\path{orchestrator/AgentTask.java}}
 is the unit of scheduled work: it carries the run identifier, the request payload,
 and any metadata the scheduler needs to make an admission decision.
 \texttt{AgentRunner}%
-\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentRunner.java}}
+\footnote{\path{orchestrator/AgentRunner.java}}
 is the component that submits \texttt{AgentTask} instances to the virtual-thread
 executor and tracks their lifecycle.
 Virtual threads make the scheduling model straightforward: each run advances on its
@@ -392,7 +392,7 @@ failure type is recorded in the \texttt{RunSnapshot} for downstream consumers.
 
 The lifecycle controls are exposed through
 \texttt{AgentLifecycle}%
-\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/orchestrator/AgentLifecycle.java}},
+\footnote{\path{orchestrator/AgentLifecycle.java}},
 which is the interface that callers use to pause, resume, and cancel a run without
 direct access to the run loop or the scheduler internals.
 
@@ -420,7 +420,7 @@ adapter layer.
 
 The \texttt{ModelClient} interface lives in
 \path{modelclient/}%
-\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/ModelClient.java}}.
+\footnote{\path{modelclient/ModelClient.java}}.
 The interface declares a single method: the caller passes a \texttt{ModelPrompt}
 and a \texttt{ModelRequestContext} in the framework's vocabulary and receives a
 \texttt{ModelOutput} in the framework's vocabulary.
@@ -445,7 +445,7 @@ public interface ModelClient {
 
 The test double is architecturally as important as the real implementation.
 The framework ships a \texttt{StubModelClient}%
-\footnote{\url{https://github.com/tnhmar/agent-framework/blob/main/src/main/java/com/agentruntime/modelclient/StubModelClient.java}}
+\footnote{\path{modelclient/StubModelClient.java}}
 that returns a fixed or scripted response sequence — a tool call on the first
 invocation, then a direct answer — allowing the full run loop to be exercised
 in a test that runs in under 100\,milliseconds with no network access.
